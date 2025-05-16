@@ -25,23 +25,56 @@ RECORD_COUNT=$(run_sql "$SQL_DIR/select_feed_info.sql" | sed -n 4p | xargs)
 
 # === Step 2: Function to call POST API and insert response
 call_post_api_and_log() {
-  echo "Calling POST API..."
+  echo "Calling POST API with array payload..."
+
+  # Initialize JSON array string
+  API_PAYLOAD="["
+
+  # Query DB to get all records to send for this feed_id
+  psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER" -t -A -F"," -c "
+    SELECT upper_limit, lower_limit, rct_count, bus_date 
+    FROM feed_limit fl
+    JOIN feed_count fc ON fl.feed_id = fc.feed_id
+    WHERE fl.feed_id = $FEED_ID;
+  " | while IFS=',' read -r UPPER_LIMIT LOWER_LIMIT RCT_COUNT BUS_DATE_RECORD; do
+
+    # Construct JSON object for each record
+    RECORD_JSON=$(cat <<EOF
+{
+  "feed_id": $FEED_ID,
+  "feed_name": "$FEED_NAME",
+  "bus_date": "$BUS_DATE_RECORD",
+  "upper_limit": $UPPER_LIMIT,
+  "lower_limit": $LOWER_LIMIT,
+  "rct_count": $RCT_COUNT,
+  "zscore": 0,
+  "msScore": 0,
+  "window_size": $WINDOW_SIZE
+}
+EOF
+)
+
+    # Append this record JSON to the array string
+    API_PAYLOAD="${API_PAYLOAD}${RECORD_JSON},"
+
+  done
+
+  # Remove trailing comma and close the JSON array
+  API_PAYLOAD="${API_PAYLOAD%,}]"
+
+  echo "Payload to API:"
+  echo "$API_PAYLOAD"
+
+  # Send POST request with the JSON array
   RESPONSE=$(curl -s -X POST "$API_URL" \
     -H "Authorization: $AUTH_TOKEN" \
     -H "Content-Type: application/json" \
-    -d "{
-      \"feed_id\": $FEED_ID,
-      \"feed_name\": \"$FEED_NAME\",
-      \"bus_date\": \"$BUS_DATE\",
-      \"upper_limit\": $UPPER_LIMIT,
-      \"lower_limit\": $LOWER_LIMIT,
-      \"rct_count\": $RCT_COUNT,
-      \"zscore\": 0,
-      \"msScore\": 0,
-      \"window_size\": $WINDOW_SIZE
-    }")
+    -d "$API_PAYLOAD")
 
-  echo "$RESPONSE" | jq -c '.ml_respone[]' | while read -r row; do
+  echo "API response received."
+
+  # Parse each object from the response array and insert into DB
+  echo "$RESPONSE" | jq -c '.ml_response[]' | while read -r row; do
     FEED_ID_VAL=$(echo "$row" | jq '.feed_id')
     FEED_NAME_VAL=$(echo "$row" | jq -r '.feed_name')
     BUS_DATE_VAL=$(echo "$row" | jq -r '.bus_date')
@@ -52,7 +85,7 @@ call_post_api_and_log() {
     MSCORE=$(echo "$row" | jq '.msScore')
     WIN_SIZE=$(echo "$row" | jq '.window_size')
 
-    # Prepare INSERT SQL
+    # Prepare INSERT SQL statement with replacements
     INSERT_SQL=$(sed -e "s/:FEED_ID/$FEED_ID_VAL/" \
                      -e "s|:FEED_NAME|$FEED_NAME_VAL|" \
                      -e "s|:BUS_DATE|$BUS_DATE_VAL|" \
@@ -64,6 +97,7 @@ call_post_api_and_log() {
                      -e "s/:WINDOW_SIZE/$WIN_SIZE/" \
                      "$SQL_DIR/feed_records_and_insert.sql" | tail -n 1)
 
+    # Execute the INSERT SQL
     echo "$INSERT_SQL" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER"
   done
 }
