@@ -97,6 +97,83 @@ elif [[ "$RECORD_COUNT" -lt "$WINDOW_SIZE" ]]; then
   call_post_api_and_log
 else
   echo "Sufficient records exist (>= window_size). Skipping API call."
+  else
+  echo "CASE 3: Found more than window_size records. Inserting and calling API"
+
+  # Step 1: Get all records (upper, lower, rct, bus_date) to insert and send
+  SELECT_PART=$(awk '/^-- SELECT Records/{flag=1;next}/^-- INSERT Template/{flag=0}flag' "$SQL_DIR/feed_records_and_insert.sql")
+  
+  API_PAYLOAD="["
+
+  echo "$SELECT_PART" | sed "s/:FEED_ID/$FEED_ID/g" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER" -t -A -F"," | while IFS=',' read -r UPPER LOWER RCT BUS_DATE_RECORD; do
+
+    # Insert into ml_log
+    INSERT_SQL=$(sed -e "s/:FEED_ID/$FEED_ID/" \
+                     -e "s|:FEED_NAME|$FEED_NAME|" \
+                     -e "s|:BUS_DATE|$BUS_DATE_RECORD|" \
+                     -e "s/:UPPER_LIMIT/$UPPER/" \
+                     -e "s/:LOWER_LIMIT/$LOWER/" \
+                     -e "s/:RCT_COUNT/$RCT/" \
+                     -e "s/:ZSCORE/0/" \
+                     -e "s/:MSCORE/0/" \
+                     -e "s/:WINDOW_SIZE/$WINDOW_SIZE/" \
+                     "$SQL_DIR/feed_records_and_insert.sql" | tail -n 1)
+
+    echo "$INSERT_SQL" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER"
+
+    # Add to API payload
+    RECORD_JSON=$(cat <<EOF
+{
+  "feed_id": $FEED_ID,
+  "feed_name": "$FEED_NAME",
+  "bus_date": "$BUS_DATE_RECORD",
+  "upper_limit": $UPPER,
+  "lower_limit": $LOWER,
+  "rct_count": $RCT,
+  "zscore": 0,
+  "msScore": 0,
+  "window_size": $WINDOW_SIZE
+}
+EOF
+)
+    API_PAYLOAD="${API_PAYLOAD}${RECORD_JSON},"
+  done
+
+  # Remove trailing comma and close array
+  API_PAYLOAD="${API_PAYLOAD%,}]"
+
+  echo "Sending payload to API..."
+  RESPONSE=$(curl -s -X POST "$API_URL" \
+    -H "Authorization: $AUTH_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$API_PAYLOAD")
+
+  echo "$RESPONSE" | jq -c '.ml_response[]' | while read -r row; do
+    FEED_ID_VAL=$(echo "$row" | jq '.feed_id')
+    FEED_NAME_VAL=$(echo "$row" | jq -r '.feed_name')
+    BUS_DATE_VAL=$(echo "$row" | jq -r '.bus_date')
+    UPPER=$(echo "$row" | jq '.upper_limit')
+    LOWER=$(echo "$row" | jq '.lower_limit')
+    RCT=$(echo "$row" | jq '.rct_count')
+    ZSCORE=$(echo "$row" | jq '.zscore')
+    MSCORE=$(echo "$row" | jq '.msScore')
+    WIN_SIZE=$(echo "$row" | jq '.window_size')
+
+    INSERT_SQL=$(sed -e "s/:FEED_ID/$FEED_ID_VAL/" \
+                     -e "s|:FEED_NAME|$FEED_NAME_VAL|" \
+                     -e "s|:BUS_DATE|$BUS_DATE_VAL|" \
+                     -e "s/:UPPER_LIMIT/$UPPER/" \
+                     -e "s/:LOWER_LIMIT/$LOWER/" \
+                     -e "s/:RCT_COUNT/$RCT/" \
+                     -e "s/:ZSCORE/$ZSCORE/" \
+                     -e "s/:MSCORE/$MSCORE/" \
+                     -e "s/:WINDOW_SIZE/$WIN_SIZE/" \
+                     "$SQL_DIR/feed_records_and_insert.sql" | tail -n 1)
+
+    echo "$INSERT_SQL" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER"
+  done
+fi
+
 fi
 
 -- ================================
