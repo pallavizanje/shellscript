@@ -171,6 +171,16 @@ LEFT JOIN ml_log ml
   ON fc.feed_id = ml.feed_id AND fc.bus_date = ml.bus_date AND ml.processed = TRUE
 WHERE ml.feed_id IS NULL
 
+-- Option 1: insert with default
+INSERT INTO ml_log (...)
+VALUES (...)
+RETURNING feed_id, bus_date;
+
+-- Option 2: post-insert update
+UPDATE ml_log
+SET processed = TRUE
+WHERE feed_id = :'feed_id' AND bus_date = :'bus_date';
+
 
 | Condition                | API `rct_config`       | `ml_log` inserts |
 | ------------------------ | ---------------------- | ---------------- |
