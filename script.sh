@@ -1,239 +1,150 @@
 #!/bin/bash
 
-set -e
+# -----------------------------
+# Configuration
+# -----------------------------
+API_URL="https://example.com/post-api"
+AUTH_TOKEN="your_auth_token"
 
-FEED_ID=$1
-BUS_DATE=$2
+# -----------------------------
+# Step 1: Run the SQL to get data
+# -----------------------------
+rows=$(psql -t -A -F"|" -f select_payload.sql)
 
-DB_HOST="localhost"
-DB_NAME="your_db"
-DB_USER="your_user"
-API_URL="https://your-api-url.com/endpoint"
-AUTH_TOKEN="Bearer your_token"
-SQL_DIR="./sql"
-
-# Helper to run SQL with substitution
-run_sql() {
-  sed "s/:FEED_ID/$FEED_ID/g" "$1" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER" -t -A -F"," 
-}
-
-# === Step 1: Fetch feed info from feed_def, feed_limit, feed_count
-read -r FEED_NAME WINDOW_SIZE <<< "$(run_sql "$SQL_DIR/select_feed_info.sql" | sed -n 1p | awk -F',' '{print $1, $2}')"
-read -r UPPER_LIMIT LOWER_LIMIT <<< "$(run_sql "$SQL_DIR/select_feed_info.sql" | sed -n 2p | awk -F',' '{print $1, $2}')"
-RCT_COUNT=$(run_sql "$SQL_DIR/select_feed_info.sql" | sed -n 3p)
-RECORD_COUNT=$(run_sql "$SQL_DIR/select_feed_info.sql" | sed -n 4p | xargs)
-
-# === Step 2: Function to call POST API and insert response
-call_post_api_and_log() {
-  echo "Calling POST API with array payload..."
-
-  # Initialize JSON array string
-  API_PAYLOAD="["
-
-  # Query DB to get all records to send for this feed_id
-  psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER" -t -A -F"," -c "
-    SELECT upper_limit, lower_limit, rct_count, bus_date 
-    FROM feed_limit fl
-    JOIN feed_count fc ON fl.feed_id = fc.feed_id
-    WHERE fl.feed_id = $FEED_ID;
-  " | while IFS=',' read -r UPPER_LIMIT LOWER_LIMIT RCT_COUNT BUS_DATE_RECORD; do
-
-    # Construct JSON object for each record
-    RECORD_JSON=$(cat <<EOF
+# -----------------------------
+# Step 2: Parse rows & group
+# -----------------------------
+echo "$rows" | awk -F"|" '
 {
-  "feed_id": $FEED_ID,
-  "feed_name": "$FEED_NAME",
-  "bus_date": "$BUS_DATE_RECORD",
-  "upper_limit": $UPPER_LIMIT,
-  "lower_limit": $LOWER_LIMIT,
-  "rct_count": $RCT_COUNT,
-  "zscore": 0,
-  "msScore": 0,
-  "window_size": $WINDOW_SIZE
+  feed_id=$1
+  feed_name=$2
+  bus_date=$3
+  window_size=$4
+  upper_limit=$5
+  lower_limit=$6
+  fc_bus_date=$7
+  rct_count=$8
+
+  key=feed_id "|" feed_name "|" bus_date "|" window_size "|" upper_limit "|" lower_limit
+  row_json = "{ \"bus_date\": \"" fc_bus_date "\", \"rct_count\": " rct_count ", \"zscore\": 0, \"msScore\": 0 }"
+
+  all_rows[key] = all_rows[key] (all_rows[key] ? "," : "") row_json
+  full_rows[key] = full_rows[key] "\n" feed_id "|" feed_name "|" fc_bus_date "|" upper_limit "|" lower_limit "|" rct_count "|" window_size
+  count[key]++
+  latest_row[key] = row_json
 }
-EOF
-)
+END {
+  for (k in count) {
+    if (count[k] == 0) {
+      continue  # Case: No records, skip
+    }
 
-    # Append this record JSON to the array string
-    API_PAYLOAD="${API_PAYLOAD}${RECORD_JSON},"
+    split(k, parts, "|")
+    feed_id = parts[1]
+    feed_name = parts[2]
+    bus_date = parts[3]
+    window_size = parts[4]
+    upper_limit = parts[5]
+    lower_limit = parts[6]
 
-  done
+    config_json = "["
+    if (count[k] >= window_size) {
+      config_json = config_json all_rows[k] "]"
+    } else {
+      config_json = config_json latest_row[k] "]"
+    }
 
-  # Remove trailing comma and close the JSON array
-  API_PAYLOAD="${API_PAYLOAD%,}]"
+    payload = "{"
+    payload = payload "\"feed_id\": " feed_id ","
+    payload = payload "\"feed_name\": \"" feed_name "\","
+    payload = payload "\"bus_date\": \"" bus_date "\","
+    payload = payload "\"upper_limit\": " upper_limit ","
+    payload = payload "\"lower_limit\": " lower_limit ","
+    payload = payload "\"window_size\": " window_size ","
+    payload = payload "\"rct_config\": " config_json
+    payload = payload "}"
 
-  echo "Payload to API:"
-  echo "$API_PAYLOAD"
+    print payload "<<<DELIM>>>" full_rows[k]
+  }
+}
+' | while IFS='<<<DELIM>>>' read -r api_payload full_row_block; do
 
-  # Send POST request with the JSON array
-  RESPONSE=$(curl -s -X POST "$API_URL" \
-    -H "Authorization: $AUTH_TOKEN" \
+  echo "Calling API for feed_id..."
+  api_response=$(echo "$api_payload" | curl -s -X POST "$API_URL" \
+    -H "Authorization: Bearer $AUTH_TOKEN" \
     -H "Content-Type: application/json" \
-    -d "$API_PAYLOAD")
+    -d @-)
 
-  echo "API response received."
+  echo "$api_response" | jq -c '.ml_respone[]' | while read -r item; do
+    feed_id=$(echo "$item" | jq -r '.feed_id')
+    feed_name=$(echo "$item" | jq -r '.feed_name')
+    bus_date=$(echo "$item" | jq -r '.bus_date')
+    upper_limit=$(echo "$item" | jq -r '.upper_limit')
+    lower_limit=$(echo "$item" | jq -r '.lower_limit')
+    rct_count=$(echo "$item" | jq -r '.rct_count')
+    zscore=$(echo "$item" | jq -r '.zscore')
+    msScore=$(echo "$item" | jq -r '.msScore')
+    window_size=$(echo "$item" | jq -r '.window_size')
 
-  # Parse each object from the response array and insert into DB
-  echo "$RESPONSE" | jq -c '.ml_response[]' | while read -r row; do
-    FEED_ID_VAL=$(echo "$row" | jq '.feed_id')
-    FEED_NAME_VAL=$(echo "$row" | jq -r '.feed_name')
-    BUS_DATE_VAL=$(echo "$row" | jq -r '.bus_date')
-    UPPER=$(echo "$row" | jq '.upper_limit')
-    LOWER=$(echo "$row" | jq '.lower_limit')
-    RCT=$(echo "$row" | jq '.rct_count')
-    ZSCORE=$(echo "$row" | jq '.zscore')
-    MSCORE=$(echo "$row" | jq '.msScore')
-    WIN_SIZE=$(echo "$row" | jq '.window_size')
-
-    # Prepare INSERT SQL statement with replacements
-    INSERT_SQL=$(sed -e "s/:FEED_ID/$FEED_ID_VAL/" \
-                     -e "s|:FEED_NAME|$FEED_NAME_VAL|" \
-                     -e "s|:BUS_DATE|$BUS_DATE_VAL|" \
-                     -e "s/:UPPER_LIMIT/$UPPER/" \
-                     -e "s/:LOWER_LIMIT/$LOWER/" \
-                     -e "s/:RCT_COUNT/$RCT/" \
-                     -e "s/:ZSCORE/$ZSCORE/" \
-                     -e "s/:MSCORE/$MSCORE/" \
-                     -e "s/:WINDOW_SIZE/$WIN_SIZE/" \
-                     "$SQL_DIR/feed_records_and_insert.sql" | tail -n 1)
-
-    # Execute the INSERT SQL
-    echo "$INSERT_SQL" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER"
+    psql \
+      --set=feed_id="$feed_id" \
+      --set=feed_name="$feed_name" \
+      --set=bus_date="$bus_date" \
+      --set=upper_limit="$upper_limit" \
+      --set=lower_limit="$lower_limit" \
+      --set=rct_count="$rct_count" \
+      --set=zscore="$zscore" \
+      --set=msScore="$msScore" \
+      --set=window_size="$window_size" \
+      -f insert_ml_log.sql
   done
-}
+done
 
-# === Step 3: Case Handling
-if [[ "$RECORD_COUNT" -eq 0 ]]; then
-  echo "CASE 1: No records found, calling API"
-  call_post_api_and_log
 
-elif [[ "$RECORD_COUNT" -lt "$WINDOW_SIZE" ]]; then
-  echo "CASE 2: Found partial records, inserting and calling API"
-
-  # Extract all SELECT statements, run only the SELECT part
-  SELECT_PART=$(awk '/^-- SELECT Records/{flag=1;next}/^-- INSERT Template/{flag=0}flag' "$SQL_DIR/feed_records_and_insert.sql")
-  echo "$SELECT_PART" | sed "s/:FEED_ID/$FEED_ID/g" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER" -t -A -F"," | while IFS=',' read -r UPPER LOWER RCT; do
-
-    INSERT_SQL=$(sed -e "s/:FEED_ID/$FEED_ID/" \
-                     -e "s|:FEED_NAME|$FEED_NAME|" \
-                     -e "s|:BUS_DATE|$BUS_DATE|" \
-                     -e "s/:UPPER_LIMIT/$UPPER/" \
-                     -e "s/:LOWER_LIMIT/$LOWER/" \
-                     -e "s/:RCT_COUNT/$RCT/" \
-                     -e "s/:ZSCORE/0/" \
-                     -e "s/:MSCORE/0/" \
-                     -e "s/:WINDOW_SIZE/$WINDOW_SIZE/" \
-                     "$SQL_DIR/feed_records_and_insert.sql" | tail -n 1)
-
-    echo "$INSERT_SQL" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER"
-  done
-
-  call_post_api_and_log
-else
-  echo "Sufficient records exist (>= window_size). Skipping API call."
-  else
-  echo "CASE 3: Found more than window_size records. Inserting and calling API"
-
-  # Step 1: Get all records (upper, lower, rct, bus_date) to insert and send
-  SELECT_PART=$(awk '/^-- SELECT Records/{flag=1;next}/^-- INSERT Template/{flag=0}flag' "$SQL_DIR/feed_records_and_insert.sql")
-  
-  API_PAYLOAD="["
-
-  echo "$SELECT_PART" | sed "s/:FEED_ID/$FEED_ID/g" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER" -t -A -F"," | while IFS=',' read -r UPPER LOWER RCT BUS_DATE_RECORD; do
-
-    # Insert into ml_log
-    INSERT_SQL=$(sed -e "s/:FEED_ID/$FEED_ID/" \
-                     -e "s|:FEED_NAME|$FEED_NAME|" \
-                     -e "s|:BUS_DATE|$BUS_DATE_RECORD|" \
-                     -e "s/:UPPER_LIMIT/$UPPER/" \
-                     -e "s/:LOWER_LIMIT/$LOWER/" \
-                     -e "s/:RCT_COUNT/$RCT/" \
-                     -e "s/:ZSCORE/0/" \
-                     -e "s/:MSCORE/0/" \
-                     -e "s/:WINDOW_SIZE/$WINDOW_SIZE/" \
-                     "$SQL_DIR/feed_records_and_insert.sql" | tail -n 1)
-
-    echo "$INSERT_SQL" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER"
-
-    # Add to API payload
-    RECORD_JSON=$(cat <<EOF
-{
-  "feed_id": $FEED_ID,
-  "feed_name": "$FEED_NAME",
-  "bus_date": "$BUS_DATE_RECORD",
-  "upper_limit": $UPPER,
-  "lower_limit": $LOWER,
-  "rct_count": $RCT,
-  "zscore": 0,
-  "msScore": 0,
-  "window_size": $WINDOW_SIZE
-}
-EOF
-)
-    API_PAYLOAD="${API_PAYLOAD}${RECORD_JSON},"
-  done
-
-  # Remove trailing comma and close array
-  API_PAYLOAD="${API_PAYLOAD%,}]"
-
-  echo "Sending payload to API..."
-  RESPONSE=$(curl -s -X POST "$API_URL" \
-    -H "Authorization: $AUTH_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$API_PAYLOAD")
-
-  echo "$RESPONSE" | jq -c '.ml_response[]' | while read -r row; do
-    FEED_ID_VAL=$(echo "$row" | jq '.feed_id')
-    FEED_NAME_VAL=$(echo "$row" | jq -r '.feed_name')
-    BUS_DATE_VAL=$(echo "$row" | jq -r '.bus_date')
-    UPPER=$(echo "$row" | jq '.upper_limit')
-    LOWER=$(echo "$row" | jq '.lower_limit')
-    RCT=$(echo "$row" | jq '.rct_count')
-    ZSCORE=$(echo "$row" | jq '.zscore')
-    MSCORE=$(echo "$row" | jq '.msScore')
-    WIN_SIZE=$(echo "$row" | jq '.window_size')
-
-    INSERT_SQL=$(sed -e "s/:FEED_ID/$FEED_ID_VAL/" \
-                     -e "s|:FEED_NAME|$FEED_NAME_VAL|" \
-                     -e "s|:BUS_DATE|$BUS_DATE_VAL|" \
-                     -e "s/:UPPER_LIMIT/$UPPER/" \
-                     -e "s/:LOWER_LIMIT/$LOWER/" \
-                     -e "s/:RCT_COUNT/$RCT/" \
-                     -e "s/:ZSCORE/$ZSCORE/" \
-                     -e "s/:MSCORE/$MSCORE/" \
-                     -e "s/:WINDOW_SIZE/$WIN_SIZE/" \
-                     "$SQL_DIR/feed_records_and_insert.sql" | tail -n 1)
-
-    echo "$INSERT_SQL" | psql -h "$DB_HOST" -d "$DB_NAME" -U "$DB_USER"
-  done
-fi
-
-fi
-
--- ================================
--- SELECT Records for CASE 2
--- ================================
--- Used to join feed_limit × feed_count by feed_id
--- Replace :FEED_ID with actual value in your shell script
--- =================================
-SELECT fl.upper_limit, fl.lower_limit, fc.rct_count
-FROM feed_limit fl
-JOIN feed_count fc ON fl.feed_id = fc.feed_id
-WHERE fl.feed_id = :FEED_ID;
-
--- ================================
--- INSERT Template for ml_log Table
--- ================================
--- Replace placeholders like :FEED_ID, :FEED_NAME, etc.
--- in your shell script before execution.
--- =================================
--- Use this template inside your shell script using `sed`
--- It will be looped for each row in the shell logic
 INSERT INTO ml_log (
-  feed_id, feed_name, bus_date, upper_limit,
-  lower_limit, rct_count, zscore, msScore, window_size
-) VALUES (
-  :FEED_ID, ':FEED_NAME', ':BUS_DATE',
-  :UPPER_LIMIT, :LOWER_LIMIT, :RCT_COUNT, :ZSCORE, :MSCORE, :WINDOW_SIZE
+  feed_id,
+  feed_name,
+  bus_date,
+  upper_limit,
+  lower_limit,
+  rct_count,
+  zscore,
+  msScore,
+  window_size
+)
+VALUES (
+  :'feed_id',
+  :'feed_name',
+  :'bus_date',
+  :'upper_limit',
+  :'lower_limit',
+  :'rct_count',
+  :'zscore',
+  :'msScore',
+  :'window_size'
 );
 
+SELECT
+  fd.feed_id,
+  fd.feed_name,
+  fd.bus_date,
+  fd.window_size,
+  fl.upper_limit,
+  fl.lower_limit,
+  fc.bus_date,
+  fc.rct_count
+FROM
+  feed_def fd
+JOIN feed_limit fl ON fl.feed_id = fd.feed_id
+JOIN feed_count fc ON fc.feed_id = fd.feed_id
+ORDER BY
+  fd.feed_id,
+  fc.bus_date;
+
+
+| Condition                | API `rct_config`       | `ml_log` inserts |
+| ------------------------ | ---------------------- | ---------------- |
+| `records == window_size` | All records            | All              |
+| `records > window_size`  | All records            | All              |
+| `records < window_size`  | **Only latest** record | All              |
+| `records = 0`            | **No request made**    | 0                |
