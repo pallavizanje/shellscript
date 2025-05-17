@@ -1,167 +1,116 @@
 #!/bin/bash
 
-# === CONFIGURATION ===
-DB_USER="your_pg_user"
-DB_NAME="your_db_name"
-API_URL="https://your.api.endpoint"
-AUTH_TOKEN="Bearer your_token_here"
+# Define variables
+SQL_FILE_PATH="adaptive_threshold_logic.sql"
+API_URL="https://your-api-endpoint.com/analyze"
+LOG_FILE="adaptive_threshold.log"
 
-# === FETCH UNIQUE FEED KEYS TO PROCESS ===
-feed_keys=$(psql -U "$DB_USER" -d "$DB_NAME" -At -c "SELECT DISTINCT feed_def_key FROM t_dqp_feed_row_thrshld;")
+# Fetch all feed_def_keys to process
+feed_def_keys=$(psql -t -A -F"," -f "$SQL_FILE_PATH" -v action="get_feed_keys")
 
-for feed_key in $feed_keys; do
-  echo "Processing feed_def_key: $feed_key"
+# Loop through each feed_def_key
+for feed_def_key in $feed_def_keys; do
+  echo "Processing feed_def_key: $feed_def_key" | tee -a "$LOG_FILE"
 
-  # Step 1: Fetch window_size, thresholds and business_date
-  read -r FixedLowerLimit FixedUpperLimit window_size bussiness_date <<< $(
-    psql -U "$DB_USER" -d "$DB_NAME" -At -c "
-      SELECT row_thrshld_lower, row_thrshld_upper, window_size, bussiness_date
-      FROM t_dqp_feed_row_thrshld
-      WHERE feed_def_key = '$feed_key'
-      LIMIT 1;")
+  # Delete old records where source_type = 'db'
+  psql -f "$SQL_FILE_PATH" -v action="delete_old_db_records" -v feed_def_key="$feed_def_key"
 
-  weekendFileExpected="false" # hardcoded or derive dynamically
+  # Insert latest metrics into t_dqp_adaptive_threshold_log
+  psql -f "$SQL_FILE_PATH" -v action="insert_metrics" -v feed_def_key="$feed_def_key"
 
-  # Step 2: Cleanup old 'db' source_type records for today
-  psql -U "$DB_USER" -d "$DB_NAME" -c "
-    DELETE FROM t_dqp_adaptive_threshold_log
-    WHERE src_feed_def_key = '$feed_key'
-      AND source_type = 'db';"
+  # Get the current window size and record count in log table
+  read window_size log_count <<< $(psql -t -A -F"," -f "$SQL_FILE_PATH" -v action="get_window_and_log_count" -v feed_def_key="$feed_def_key")
 
-  # Step 3: Insert new records based on window size
-  psql -U "$DB_USER" -d "$DB_NAME" -c "
-    WITH limit_value AS (
-      SELECT window_size FROM t_dqp_feed_row_thrshld WHERE feed_def_key = '$feed_key'
-    )
-    INSERT INTO t_dqp_adaptive_threshold_log(
-      src_feed_def_key, context_id, dataset_name,
-      bussiness_date, feed_name, record_count, source_type
-    )
-    SELECT 
-      frt.feed_def_key, 'ctx1', 'dataset',
-      frt.bussiness_date, 'feedName',
-      COALESCE(fvm.metric_val1::BIGINT, 0), 'db'
-    FROM t_dqp_feed_row_thrshld frt
-    JOIN t_dqp_feed_vldn_metrics fvm
-      ON frt.feed_def_key = fvm.feed_inst_key
-    WHERE frt.feed_def_key = '$feed_key'
-    ORDER BY fvm.bussiness_date DESC
-    LIMIT (SELECT window_size FROM limit_value);"
+  # Get row threshold limits and weekendFileExpected
+  read lower_limit upper_limit weekend_expected <<< $(psql -t -A -F"," -f "$SQL_FILE_PATH" -v action="get_thresholds" -v feed_def_key="$feed_def_key")
 
-  # Step 4: Fetch record_count for first row
-  record_count=$(psql -U "$DB_USER" -d "$DB_NAME" -At -c "
-    SELECT record_count FROM t_dqp_adaptive_threshold_log
-    WHERE src_feed_def_key = '$feed_key' AND source_type = 'db'
-    ORDER BY bussiness_date DESC LIMIT 1;")
+  # Get base values for requestBody
+  read latest_business_date latest_record_count latest_feed_name <<< $(psql -t -A -F"," -f "$SQL_FILE_PATH" -v action="get_base_info" -v feed_def_key="$feed_def_key")
 
-  # Step 5: Count number of inserted records for this feed_key
-  record_count_in_log=$(psql -U "$DB_USER" -d "$DB_NAME" -At -c "
-    SELECT COUNT(*) FROM t_dqp_adaptive_threshold_log
-    WHERE src_feed_def_key = '$feed_key' AND source_type = 'db'")
+  # Build rctConfig JSON
+  rctConfig=$(jq -n \
+    --arg type "DYNAMIC" \
+    --argjson FixedUpperLimit "$upper_limit" \
+    --argjson FixedLowerLimit "$lower_limit" \
+    --argjson dynamicWindowSize "$window_size" \
+    --argjson weekendFileExpected "$weekend_expected" \
+    '[{type: $type, FixedUpperLimit: $FixedUpperLimit, FixedLowerLimit: $FixedLowerLimit, dynamicWindowSize: $dynamicWindowSize, weekendFileExpected: $weekendFileExpected}]')
 
-  # Step 6: Construct dynamic_log_data
-  dynamic_log_json="[]"
-  if [ "$record_count_in_log" -eq "$window_size" ]; then
-    dynamic_data=$(psql -U "$DB_USER" -d "$DB_NAME" -At -F"," -c "
-      SELECT src_feed_def_key, bussiness_date, record_count, feed_name
-      FROM t_dqp_adaptive_threshold_log
-      WHERE src_feed_def_key = '$feed_key' AND source_type = 'db'
-      ORDER BY bussiness_date DESC
-    ")
-
-    while IFS=',' read -r def_key biz_date rec_count feed_name; do
-      entry=$(jq -n \
-        --arg fd "$def_key" \
-        --arg bd "$biz_date" \
-        --arg rc "$rec_count" \
-        --arg fn "$feed_name" \
-        ' {
-          feed_def_key: ($fd|tonumber),
-          bussiness_date: $bd,
-          record_count: $rc,
-          feed_name: $fn,
-          iqr_lower_threshold: 0,
-          iqr_upper_threshold: 0,
-          zscore: 0,
-          gmm_lower_threshold: 0,
-          gmm_upper_threshold: 0,
-          iqr_outlier: null,
-          zscore_outlier: null,
-          if_outlier: null,
-          gmm_outlier: null,
-          anomaly_percentage: 0,
-          last_updated_on: now
-        }')
-      dynamic_log_json=$(echo "$dynamic_log_json" | jq ". + [\$entry]" --argjson entry "$entry")
-    done <<< "$dynamic_data"
+  # Generate dynamic_log_data payload based on record count
+  if [ "$log_count" -lt "$window_size" ]; then
+    dynamic_log_data="[]"
+  else
+    dynamic_log_data=$(psql -t -A -F"|" -f "$SQL_FILE_PATH" -v action="get_dynamic_data" -v feed_def_key="$feed_def_key" | \
+      jq -Rn '[inputs | split("|") | {
+        feed_def_key: .[0]|tonumber,
+        bussiness_date: .[1],
+        record_count: .[2],
+        feed_name: .[3],
+        iqr_lower_threshold: 0,
+        iqr_upper_threshold: 0,
+        zscore: 0,
+        gmm_lower_threshold: 0,
+        gmm_upper_threshold: 0,
+        iqr_outlier: null,
+        zscore_outlier: null,
+        if_outlier: null,
+        gmm_outlier: null,
+        anomaly_percentage: 0,
+        last_updated_on: now
+      }]')
   fi
 
-  # Step 7: Construct request body
-  request_payload=$(jq -n \
-    --arg fd "$feed_key" \
-    --arg bd "$bussiness_date" \
-    --arg rc "$record_count" \
-    --arg fn "feedName" \
-    --arg ful "$FixedUpperLimit" \
-    --arg fll "$FixedLowerLimit" \
-    --arg ws "$window_size" \
-    --arg wfe "$weekendFileExpected" \
-    --argjson dld "$dynamic_log_json" \
-    '{
-      feed_def_key: ($fd|tonumber),
-      bussiness_date: $bd,
-      record_count: $rc,
-      feed_name: $fn,
-      rctConfig: [{
-        type: "DYNAMIC",
-        FixedUpperLimit: ($ful|tonumber),
-        FixedLowerLimit: ($fll|tonumber),
-        dynamicWindowSize: ($ws|tonumber),
-        weekendFileExpected: ($wfe|test("true"))
-      }],
-      dynamic_log_data: $dld
-    }')
+  # Construct the final request payload
+  request_body=$(jq -n \
+    --arg feed_def_key "$feed_def_key" \
+    --arg bussiness_date "$latest_business_date" \
+    --arg record_count "$latest_record_count" \
+    --arg feed_name "$latest_feed_name" \
+    --argjson rctConfig "$rctConfig" \
+    --argjson dynamic_log_data "$dynamic_log_data" \
+    '{feed_def_key: $feed_def_key, bussiness_date: $bussiness_date, record_count: $record_count, feed_name: $feed_name, rctConfig: $rctConfig, dynamic_log_data: $dynamic_log_data}')
 
-  # Step 8: Make API call
-  echo "Sending API request for feed_key: $feed_key"
-  response=$(curl -s -X POST "$API_URL" \
-    -H "Authorization: $AUTH_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$request_payload")
+  echo "Request: $request_body" | tee -a "$LOG_FILE"
 
-  echo "API Response: $response"
+  # Make API call
+  response=$(curl -s -X POST -H "Content-Type: application/json" -d "$request_body" "$API_URL")
 
-  # Step 9: Parse response and insert ML results
-  ml_data=$(echo "$response" | jq -c '.ml_response[]')
-  for row in $ml_data; do
-    fd=$(echo "$row" | jq -r '.feed_def_key')
-    bd=$(echo "$row" | jq -r '.bussiness_date')
-    rc=$(echo "$row" | jq -r '.record_count')
-    fn=$(echo "$row" | jq -r '.feed_name')
-    iqr_lt=$(echo "$row" | jq -r '.iqr_lower_threshold')
-    iqr_ut=$(echo "$row" | jq -r '.iqr_upper_threshold')
-    zscore=$(echo "$row" | jq -r '.zscore')
-    gmm_lt=$(echo "$row" | jq -r '.gmm_lower_threshold')
-    gmm_ut=$(echo "$row" | jq -r '.gmm_upper_threshold')
-    iqr_out=$(echo "$row" | jq -r '.iqr_outlier')
-    zscore_out=$(echo "$row" | jq -r '.zscore_outlier')
-    if_out=$(echo "$row" | jq -r '.if_outlier')
-    gmm_out=$(echo "$row" | jq -r '.gmm_outlier')
-    anomaly=$(echo "$row" | jq -r '.anomaly_percentage')
+  echo "Response: $response" | tee -a "$LOG_FILE"
 
-    psql -U "$DB_USER" -d "$DB_NAME" -c "
-      INSERT INTO t_dqp_adaptive_threshold_log(
-        src_feed_def_key, context_id, dataset_name, bussiness_date,
-        feed_name, record_count, iqr_lower_threshold, iqr_upper_threshold,
-        zscore, gmm_lower_threshold, gmm_upper_threshold, iqr_outlier,
-        zscore_outlier, if_outlier, gmm_outlier, anomaly_percentage,
-        last_updated_on, source_type)
-      VALUES (
-        '$fd', 'ctx1', 'dataset', '$bd', '$fn', $rc,
-        $iqr_lt, $iqr_ut, $zscore, $gmm_lt, $gmm_ut,
-        '$iqr_out', '$zscore_out', '$if_out', '$gmm_out', $anomaly, now(), 'ml');"
+  # Insert response ml_response back into DB
+  echo "$response" | jq -c '.ml_response[]' | while read -r ml_row; do
+    feed_def_key=$(echo "$ml_row" | jq -r '.feed_def_key')
+    bussiness_date=$(echo "$ml_row" | jq -r '.bussiness_date')
+    record_count=$(echo "$ml_row" | jq -r '.record_count')
+    feed_name=$(echo "$ml_row" | jq -r '.feed_name')
+    iqr_lower_threshold=$(echo "$ml_row" | jq -r '.iqr_lower_threshold')
+    iqr_upper_threshold=$(echo "$ml_row" | jq -r '.iqr_upper_threshold')
+    zscore=$(echo "$ml_row" | jq -r '.zscore')
+    gmm_lower_threshold=$(echo "$ml_row" | jq -r '.gmm_lower_threshold')
+    gmm_upper_threshold=$(echo "$ml_row" | jq -r '.gmm_upper_threshold')
+    iqr_outlier=$(echo "$ml_row" | jq -r '.iqr_outlier')
+    zscore_outlier=$(echo "$ml_row" | jq -r '.zscore_outlier')
+    if_outlier=$(echo "$ml_row" | jq -r '.if_outlier')
+    gmm_outlier=$(echo "$ml_row" | jq -r '.gmm_outlier')
+    anomaly_percentage=$(echo "$ml_row" | jq -r '.anomaly_percentage')
+
+    psql -f "$SQL_FILE_PATH" \
+      -v action="insert_ml_response" \
+      -v src_feed_def_key="$feed_def_key" \
+      -v bussiness_date="$bussiness_date" \
+      -v feed_name="$feed_name" \
+      -v record_count="$record_count" \
+      -v iqr_lower_threshold="$iqr_lower_threshold" \
+      -v iqr_upper_threshold="$iqr_upper_threshold" \
+      -v zscore="$zscore" \
+      -v gmm_lower_threshold="$gmm_lower_threshold" \
+      -v gmm_upper_threshold="$gmm_upper_threshold" \
+      -v iqr_outlier="$iqr_outlier" \
+      -v zscore_outlier="$zscore_outlier" \
+      -v if_outlier="$if_outlier" \
+      -v gmm_outlier="$gmm_outlier" \
+      -v anomaly_percentage="$anomaly_percentage"
   done
 
+  echo "Completed processing for feed_def_key: $feed_def_key" | tee -a "$LOG_FILE"
 done
-
-echo "Feed processing complete."
