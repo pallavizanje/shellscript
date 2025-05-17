@@ -160,7 +160,7 @@ JOIN feed_count fc ON fc.feed_id = fd.feed_id
 ORDER BY
   fd.feed_id,
   fc.bus_date;
-
+ALTER TABLE ml_log ADD COLUMN processed BOOLEAN DEFAULT FALSE;
 
 | Condition                | API `rct_config`       | `ml_log` inserts |
 | ------------------------ | ---------------------- | ---------------- |
