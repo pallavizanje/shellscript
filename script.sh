@@ -1,190 +1,167 @@
 #!/bin/bash
 
-# -----------------------------
-# Configuration
-# -----------------------------
-API_URL="https://example.com/post-api"
-AUTH_TOKEN="your_auth_token"
+# === CONFIGURATION ===
+DB_USER="your_pg_user"
+DB_NAME="your_db_name"
+API_URL="https://your.api.endpoint"
+AUTH_TOKEN="Bearer your_token_here"
 
-# -----------------------------
-# Step 1: Run the SQL to get data
-# -----------------------------
-rows=$(psql -t -A -F"|" -f select_payload.sql)
+# === FETCH UNIQUE FEED KEYS TO PROCESS ===
+feed_keys=$(psql -U "$DB_USER" -d "$DB_NAME" -At -c "SELECT DISTINCT feed_def_key FROM t_dqp_feed_row_thrshld;")
 
-# -----------------------------
-# Step 2: Parse rows & group
-# -----------------------------
-echo "$rows" | awk -F"|" '
-{
-  feed_id=$1
-  feed_name=$2
-  bus_date=$3
-  window_size=$4
-  upper_limit=$5
-  lower_limit=$6
-  fc_bus_date=$7
-  rct_count=$8
+for feed_key in $feed_keys; do
+  echo "Processing feed_def_key: $feed_key"
 
-  key=feed_id "|" feed_name "|" bus_date "|" window_size "|" upper_limit "|" lower_limit
-  row_json = "{ \"bus_date\": \"" fc_bus_date "\", \"rct_count\": " rct_count ", \"zscore\": 0, \"msScore\": 0 }"
+  # Step 1: Fetch window_size, thresholds and business_date
+  read -r FixedLowerLimit FixedUpperLimit window_size bussiness_date <<< $(
+    psql -U "$DB_USER" -d "$DB_NAME" -At -c "
+      SELECT row_thrshld_lower, row_thrshld_upper, window_size, bussiness_date
+      FROM t_dqp_feed_row_thrshld
+      WHERE feed_def_key = '$feed_key'
+      LIMIT 1;")
 
-  all_rows[key] = all_rows[key] (all_rows[key] ? "," : "") row_json
-  full_rows[key] = full_rows[key] "\n" feed_id "|" feed_name "|" fc_bus_date "|" upper_limit "|" lower_limit "|" rct_count "|" window_size
-  count[key]++
-  latest_row[key] = row_json
-}
-END {
-  for (k in count) {
-    split(k, parts, "|")
-    feed_id = parts[1]
-    feed_name = parts[2]
-    bus_date = parts[3]
-    window_size = parts[4]
-    upper_limit = parts[5]
-    lower_limit = parts[6]
+  weekendFileExpected="false" # hardcoded or derive dynamically
 
-    rcount = count[k]
+  # Step 2: Cleanup old 'db' source_type records for today
+  psql -U "$DB_USER" -d "$DB_NAME" -c "
+    DELETE FROM t_dqp_adaptive_threshold_log
+    WHERE src_feed_def_key = '$feed_key'
+      AND source_type = 'db';"
 
-    # Determine what to send to API
-    config_json = "["
-    if (rcount >= window_size) {
-      config_json = config_json all_rows[k] "]"
-    } else if (rcount > 0) {
-      config_json = config_json latest_row[k] "]"
-    } else {
-      config_json = "[]"
-    }
+  # Step 3: Insert new records based on window size
+  psql -U "$DB_USER" -d "$DB_NAME" -c "
+    WITH limit_value AS (
+      SELECT window_size FROM t_dqp_feed_row_thrshld WHERE feed_def_key = '$feed_key'
+    )
+    INSERT INTO t_dqp_adaptive_threshold_log(
+      src_feed_def_key, context_id, dataset_name,
+      bussiness_date, feed_name, record_count, source_type
+    )
+    SELECT 
+      frt.feed_def_key, 'ctx1', 'dataset',
+      frt.bussiness_date, 'feedName',
+      COALESCE(fvm.metric_val1::BIGINT, 0), 'db'
+    FROM t_dqp_feed_row_thrshld frt
+    JOIN t_dqp_feed_vldn_metrics fvm
+      ON frt.feed_def_key = fvm.feed_inst_key
+    WHERE frt.feed_def_key = '$feed_key'
+    ORDER BY fvm.bussiness_date DESC
+    LIMIT (SELECT window_size FROM limit_value);"
 
-    payload = "{"
-    payload = payload "\"feed_id\": " feed_id ","
-    payload = payload "\"feed_name\": \"" feed_name "\","
-    payload = payload "\"bus_date\": \"" bus_date "\","
-    payload = payload "\"upper_limit\": " upper_limit ","
-    payload = payload "\"lower_limit\": " lower_limit ","
-    payload = payload "\"window_size\": " window_size ","
-    payload = payload "\"rct_config\": " config_json
-    payload = payload "}"
+  # Step 4: Fetch record_count for first row
+  record_count=$(psql -U "$DB_USER" -d "$DB_NAME" -At -c "
+    SELECT record_count FROM t_dqp_adaptive_threshold_log
+    WHERE src_feed_def_key = '$feed_key' AND source_type = 'db'
+    ORDER BY bussiness_date DESC LIMIT 1;")
 
-    print payload "<<<DELIM>>>" full_rows[k]
-  }
-}
-' | while IFS='<<<DELIM>>>' read -r api_payload full_row_block; do
+  # Step 5: Count number of inserted records for this feed_key
+  record_count_in_log=$(psql -U "$DB_USER" -d "$DB_NAME" -At -c "
+    SELECT COUNT(*) FROM t_dqp_adaptive_threshold_log
+    WHERE src_feed_def_key = '$feed_key' AND source_type = 'db'")
 
-  # Step 1: Insert original records into ml_log (from DB)
-  echo "$full_row_block" | while IFS="|" read -r feed_id feed_name bus_date upper_limit lower_limit rct_count window_size; do
-    if [[ -n "$feed_id" ]]; then
-      psql \
-        --set=feed_id="$feed_id" \
-        --set=feed_name="$feed_name" \
-        --set=bus_date="$bus_date" \
-        --set=upper_limit="$upper_limit" \
-        --set=lower_limit="$lower_limit" \
-        --set=rct_count="$rct_count" \
-        --set=zscore="0" \
-        --set=msScore="0" \
-        --set=window_size="$window_size" \
-        -f insert_ml_log.sql
-    fi
-  done
+  # Step 6: Construct dynamic_log_data
+  dynamic_log_json="[]"
+  if [ "$record_count_in_log" -eq "$window_size" ]; then
+    dynamic_data=$(psql -U "$DB_USER" -d "$DB_NAME" -At -F"," -c "
+      SELECT src_feed_def_key, bussiness_date, record_count, feed_name
+      FROM t_dqp_adaptive_threshold_log
+      WHERE src_feed_def_key = '$feed_key' AND source_type = 'db'
+      ORDER BY bussiness_date DESC
+    ")
 
-  # Step 2: Call the POST API
-  api_response=$(echo "$api_payload" | curl -s -X POST "$API_URL" \
-    -H "Authorization: Bearer $AUTH_TOKEN" \
+    while IFS=',' read -r def_key biz_date rec_count feed_name; do
+      entry=$(jq -n \
+        --arg fd "$def_key" \
+        --arg bd "$biz_date" \
+        --arg rc "$rec_count" \
+        --arg fn "$feed_name" \
+        ' {
+          feed_def_key: ($fd|tonumber),
+          bussiness_date: $bd,
+          record_count: $rc,
+          feed_name: $fn,
+          iqr_lower_threshold: 0,
+          iqr_upper_threshold: 0,
+          zscore: 0,
+          gmm_lower_threshold: 0,
+          gmm_upper_threshold: 0,
+          iqr_outlier: null,
+          zscore_outlier: null,
+          if_outlier: null,
+          gmm_outlier: null,
+          anomaly_percentage: 0,
+          last_updated_on: now
+        }')
+      dynamic_log_json=$(echo "$dynamic_log_json" | jq ". + [\$entry]" --argjson entry "$entry")
+    done <<< "$dynamic_data"
+  fi
+
+  # Step 7: Construct request body
+  request_payload=$(jq -n \
+    --arg fd "$feed_key" \
+    --arg bd "$bussiness_date" \
+    --arg rc "$record_count" \
+    --arg fn "feedName" \
+    --arg ful "$FixedUpperLimit" \
+    --arg fll "$FixedLowerLimit" \
+    --arg ws "$window_size" \
+    --arg wfe "$weekendFileExpected" \
+    --argjson dld "$dynamic_log_json" \
+    '{
+      feed_def_key: ($fd|tonumber),
+      bussiness_date: $bd,
+      record_count: $rc,
+      feed_name: $fn,
+      rctConfig: [{
+        type: "DYNAMIC",
+        FixedUpperLimit: ($ful|tonumber),
+        FixedLowerLimit: ($fll|tonumber),
+        dynamicWindowSize: ($ws|tonumber),
+        weekendFileExpected: ($wfe|test("true"))
+      }],
+      dynamic_log_data: $dld
+    }')
+
+  # Step 8: Make API call
+  echo "Sending API request for feed_key: $feed_key"
+  response=$(curl -s -X POST "$API_URL" \
+    -H "Authorization: $AUTH_TOKEN" \
     -H "Content-Type: application/json" \
-    -d @-)
+    -d "$request_payload")
 
-  # Step 3: Insert API response into ml_log
-  echo "$api_response" | jq -c '.ml_respone[]' | while read -r item; do
-    feed_id=$(echo "$item" | jq -r '.feed_id')
-    feed_name=$(echo "$item" | jq -r '.feed_name')
-    bus_date=$(echo "$item" | jq -r '.bus_date')
-    upper_limit=$(echo "$item" | jq -r '.upper_limit')
-    lower_limit=$(echo "$item" | jq -r '.lower_limit')
-    rct_count=$(echo "$item" | jq -r '.rct_count')
-    zscore=$(echo "$item" | jq -r '.zscore')
-    msScore=$(echo "$item" | jq -r '.msScore')
-    window_size=$(echo "$item" | jq -r '.window_size')
+  echo "API Response: $response"
 
-    psql \
-      --set=feed_id="$feed_id" \
-      --set=feed_name="$feed_name" \
-      --set=bus_date="$bus_date" \
-      --set=upper_limit="$upper_limit" \
-      --set=lower_limit="$lower_limit" \
-      --set=rct_count="$rct_count" \
-      --set=zscore="$zscore" \
-      --set=msScore="$msScore" \
-      --set=window_size="$window_size" \
-      -f insert_ml_log.sql
+  # Step 9: Parse response and insert ML results
+  ml_data=$(echo "$response" | jq -c '.ml_response[]')
+  for row in $ml_data; do
+    fd=$(echo "$row" | jq -r '.feed_def_key')
+    bd=$(echo "$row" | jq -r '.bussiness_date')
+    rc=$(echo "$row" | jq -r '.record_count')
+    fn=$(echo "$row" | jq -r '.feed_name')
+    iqr_lt=$(echo "$row" | jq -r '.iqr_lower_threshold')
+    iqr_ut=$(echo "$row" | jq -r '.iqr_upper_threshold')
+    zscore=$(echo "$row" | jq -r '.zscore')
+    gmm_lt=$(echo "$row" | jq -r '.gmm_lower_threshold')
+    gmm_ut=$(echo "$row" | jq -r '.gmm_upper_threshold')
+    iqr_out=$(echo "$row" | jq -r '.iqr_outlier')
+    zscore_out=$(echo "$row" | jq -r '.zscore_outlier')
+    if_out=$(echo "$row" | jq -r '.if_outlier')
+    gmm_out=$(echo "$row" | jq -r '.gmm_outlier')
+    anomaly=$(echo "$row" | jq -r '.anomaly_percentage')
+
+    psql -U "$DB_USER" -d "$DB_NAME" -c "
+      INSERT INTO t_dqp_adaptive_threshold_log(
+        src_feed_def_key, context_id, dataset_name, bussiness_date,
+        feed_name, record_count, iqr_lower_threshold, iqr_upper_threshold,
+        zscore, gmm_lower_threshold, gmm_upper_threshold, iqr_outlier,
+        zscore_outlier, if_outlier, gmm_outlier, anomaly_percentage,
+        last_updated_on, source_type)
+      VALUES (
+        '$fd', 'ctx1', 'dataset', '$bd', '$fn', $rc,
+        $iqr_lt, $iqr_ut, $zscore, $gmm_lt, $gmm_ut,
+        '$iqr_out', '$zscore_out', '$if_out', '$gmm_out', $anomaly, now(), 'ml');"
   done
+
 done
 
-
-
-INSERT INTO ml_log (
-  feed_id,
-  feed_name,
-  bus_date,
-  upper_limit,
-  lower_limit,
-  rct_count,
-  zscore,
-  msScore,
-  window_size
-)
-VALUES (
-  :'feed_id',
-  :'feed_name',
-  :'bus_date',
-  :'upper_limit',
-  :'lower_limit',
-  :'rct_count',
-  :'zscore',
-  :'msScore',
-  :'window_size'
-);
-
-SELECT
-  fd.feed_id,
-  fd.feed_name,
-  fd.bus_date,
-  fd.window_size,
-  fl.upper_limit,
-  fl.lower_limit,
-  fc.bus_date,
-  fc.rct_count
-FROM
-  feed_def fd
-JOIN feed_limit fl ON fl.feed_id = fd.feed_id
-JOIN feed_count fc ON fc.feed_id = fd.feed_id
-ORDER BY
-  fd.feed_id,
-  fc.bus_date;
-ALTER TABLE ml_log ADD COLUMN processed BOOLEAN DEFAULT FALSE;
-
--- Example join condition to exclude already processed
-SELECT ...
-FROM feed_def fd
-JOIN feed_limit fl ON fd.feed_id = fl.feed_id
-JOIN feed_count fc ON fd.feed_id = fc.feed_id
-LEFT JOIN ml_log ml 
-  ON fc.feed_id = ml.feed_id AND fc.bus_date = ml.bus_date AND ml.processed = TRUE
-WHERE ml.feed_id IS NULL
-
--- Option 1: insert with default
-INSERT INTO ml_log (...)
-VALUES (...)
-RETURNING feed_id, bus_date;
-
--- Option 2: post-insert update
-UPDATE ml_log
-SET processed = TRUE
-WHERE feed_id = :'feed_id' AND bus_date = :'bus_date';
-
-
-| Condition                | API `rct_config`       | `ml_log` inserts |
-| ------------------------ | ---------------------- | ---------------- |
-| `records == window_size` | All records            | All              |
-| `records > window_size`  | All records            | All              |
-| `records < window_size`  | **Only latest** record | All              |
-| `records = 0`            | **No request made**    | 0                |
+echo "Feed processing complete."
