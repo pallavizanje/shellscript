@@ -162,6 +162,16 @@ ORDER BY
   fc.bus_date;
 ALTER TABLE ml_log ADD COLUMN processed BOOLEAN DEFAULT FALSE;
 
+-- Example join condition to exclude already processed
+SELECT ...
+FROM feed_def fd
+JOIN feed_limit fl ON fd.feed_id = fl.feed_id
+JOIN feed_count fc ON fd.feed_id = fc.feed_id
+LEFT JOIN ml_log ml 
+  ON fc.feed_id = ml.feed_id AND fc.bus_date = ml.bus_date AND ml.processed = TRUE
+WHERE ml.feed_id IS NULL
+
+
 | Condition                | API `rct_config`       | `ml_log` inserts |
 | ------------------------ | ---------------------- | ---------------- |
 | `records == window_size` | All records            | All              |
