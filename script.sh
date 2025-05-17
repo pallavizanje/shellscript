@@ -35,10 +35,6 @@ echo "$rows" | awk -F"|" '
 }
 END {
   for (k in count) {
-    if (count[k] == 0) {
-      continue  # Case: No records, skip
-    }
-
     split(k, parts, "|")
     feed_id = parts[1]
     feed_name = parts[2]
@@ -47,11 +43,16 @@ END {
     upper_limit = parts[5]
     lower_limit = parts[6]
 
+    rcount = count[k]
+
+    # Determine what to send to API
     config_json = "["
-    if (count[k] >= window_size) {
+    if (rcount >= window_size) {
       config_json = config_json all_rows[k] "]"
-    } else {
+    } else if (rcount > 0) {
       config_json = config_json latest_row[k] "]"
+    } else {
+      config_json = "[]"
     }
 
     payload = "{"
@@ -69,12 +70,30 @@ END {
 }
 ' | while IFS='<<<DELIM>>>' read -r api_payload full_row_block; do
 
-  echo "Calling API for feed_id..."
+  # Step 1: Insert original records into ml_log (from DB)
+  echo "$full_row_block" | while IFS="|" read -r feed_id feed_name bus_date upper_limit lower_limit rct_count window_size; do
+    if [[ -n "$feed_id" ]]; then
+      psql \
+        --set=feed_id="$feed_id" \
+        --set=feed_name="$feed_name" \
+        --set=bus_date="$bus_date" \
+        --set=upper_limit="$upper_limit" \
+        --set=lower_limit="$lower_limit" \
+        --set=rct_count="$rct_count" \
+        --set=zscore="0" \
+        --set=msScore="0" \
+        --set=window_size="$window_size" \
+        -f insert_ml_log.sql
+    fi
+  done
+
+  # Step 2: Call the POST API
   api_response=$(echo "$api_payload" | curl -s -X POST "$API_URL" \
     -H "Authorization: Bearer $AUTH_TOKEN" \
     -H "Content-Type: application/json" \
     -d @-)
 
+  # Step 3: Insert API response into ml_log
   echo "$api_response" | jq -c '.ml_respone[]' | while read -r item; do
     feed_id=$(echo "$item" | jq -r '.feed_id')
     feed_name=$(echo "$item" | jq -r '.feed_name')
@@ -99,6 +118,7 @@ END {
       -f insert_ml_log.sql
   done
 done
+
 
 
 INSERT INTO ml_log (
