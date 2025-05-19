@@ -2,14 +2,14 @@
 
 -- Variables expected to be passed via psql: 
 -- :feed_def_key
--- :action (can be 'delete_old', 'insert_new', 'count_log', 'select_log_for_api')
+-- :action (can be 'DELETE_OLD_DB', 'INSERT_NEW_FROM_SOURCE', 'COUNT_EXISTING_LOGS', 'SELECT_LOG_RECORDS', 'GET_WINDOW_THRESHOLD')
 
 -- Action dispatcher
-\if :action = 'delete_old'
+\if :action = 'DELETE_OLD_DB'
   DELETE FROM t_dqp_adaptive_threshold_log 
   WHERE src_feed_def_key = :'feed_def_key' AND source_type = 'db';
 
-\elif :action = 'insert_new'
+\elif :action = 'INSERT_NEW_FROM_SOURCE'
   WITH limit_value AS (
     SELECT window_size FROM t_dqp_feed_row_thrshld WHERE feed_def_key = :'feed_def_key'
   )
@@ -30,12 +30,12 @@
   ORDER BY fvm.bussiness_date DESC
   LIMIT (SELECT window_size FROM limit_value);
 
-\elif :action = 'count_log'
+\elif :action = 'COUNT_EXISTING_LOGS'
   SELECT COUNT(*) 
   FROM t_dqp_adaptive_threshold_log 
   WHERE src_feed_def_key = :'feed_def_key' AND source_type = 'db';
 
-\elif :action = 'select_log_for_api'
+\elif :action = 'SELECT_LOG_RECORDS'
   SELECT 
     src_feed_def_key,
     bussiness_date,
@@ -56,7 +56,7 @@
   WHERE src_feed_def_key = :'feed_def_key' AND source_type = 'db'
   ORDER BY bussiness_date DESC;
 
-\elif :action = 'get_window_size'
+\elif :action = 'GET_WINDOW_THRESHOLD'
   SELECT window_size, row_thrshld_lower, row_thrshld_upper 
   FROM t_dqp_feed_row_thrshld
   WHERE feed_def_key = :'feed_def_key';
