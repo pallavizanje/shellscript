@@ -13,10 +13,10 @@ for feed_def_key in $feed_def_keys; do
   echo "Processing feed_def_key: $feed_def_key" | tee -a "$LOG_FILE"
 
   # Delete old records where source_type = 'db'
-  psql -f "$SQL_FILE_PATH" -v action="delete_old_db_records" -v feed_def_key="$feed_def_key"
+  psql -f "$SQL_FILE_PATH" -v action="delete_old" -v feed_def_key="$feed_def_key"
 
   # Insert latest metrics into t_dqp_adaptive_threshold_log
-  psql -f "$SQL_FILE_PATH" -v action="insert_metrics" -v feed_def_key="$feed_def_key"
+  psql -f "$SQL_FILE_PATH" -v action="insert_new" -v feed_def_key="$feed_def_key"
 
   # Get the current window size and record count in log table
   read window_size log_count <<< $(psql -t -A -F"," -f "$SQL_FILE_PATH" -v action="get_window_and_log_count" -v feed_def_key="$feed_def_key")
@@ -40,7 +40,7 @@ for feed_def_key in $feed_def_keys; do
   if [ "$log_count" -lt "$window_size" ]; then
     dynamic_log_data="[]"
   else
-    dynamic_log_data=$(psql -t -A -F"|" -f "$SQL_FILE_PATH" -v action="get_dynamic_data" -v feed_def_key="$feed_def_key" | \
+    dynamic_log_data=$(psql -t -A -F"|" -f "$SQL_FILE_PATH" -v action="select_log_for_api" -v feed_def_key="$feed_def_key" | \
       jq -Rn '[inputs | split("|") | {
         feed_def_key: .[0]|tonumber,
         bussiness_date: .[1],
