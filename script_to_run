@@ -1,0 +1,13 @@
+dynamic_count ${feed_def_key} ${bussiness_date} ${record_count} ${feed_name} ${FixedUpperLimit} ${FixedLowerLimit} ${dynamicWindowSize} ${weekendFileExpected}
+
+You can call this function for each set of values like this:
+dynamic_count "feed_key_123" "2024-05-20" "100" "my_feed" "200" "50" "5" "YES"
+
+Or dynamically from a SQL query:
+psql "$DB_CONN" -t -A -F '|' -c "
+  SELECT feed_def_key, bussiness_date, 100, 'MyFeed', row_thrshld_upper, row_thrshld_lower, window_size, 'NO'
+  FROM t_dqp_feed_row_thrshld
+" | while IFS='|' read -r fkey date rc fname upper lower wsize weekend; do
+  dynamic_count "$fkey" "$date" "$rc" "$fname" "$upper" "$lower" "$wsize" "$weekend"
+done
+
