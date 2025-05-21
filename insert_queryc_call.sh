@@ -19,37 +19,33 @@ dynamic_count() {
   if [[ "$log_count" -eq 0 ]]; then
     log "No existing DB records for $feed_def_key — inserting initial data..."
 
+    f [[ "$log_count" -eq 0 ]]; then
+    log "No existing DB records for $feed_def_key — inserting initial data..."
+
     psql "$DB_CONN" <<SQL
-WITH limit_value AS (
-  SELECT window_size FROM t_dqp_feed_row_thrshld
-  WHERE feed_def_key = '$feed_def_key'
-),
-ins AS (
-  INSERT INTO t_dqp_adaptive_threshold_log (
-    src_feed_def_key,
-    context_id,
-    dataset_name,
-    bussiness_date,
-    feed_name,
-    record_count,
-    source_type
-  )
-  SELECT
-    frt.feed_def_key,
-    '1',
-    'dataset',
-    frt.bussiness_date,
-    '$feed_name',
-    CAST(COALESCE(fvm.metric_val1, '0') AS BIGINT),
-    'db'
-  FROM t_dqp_feed_row_thrshld frt
-  JOIN t_dqp_feed_vldn_metrics fvm
-    ON frt.feed_def_key = fvm.feed_inst_key
-  WHERE frt.feed_def_key = '$feed_def_key'
-  ORDER BY frt.bussiness_date DESC
-  LIMIT (SELECT window_size FROM limit_value)
+INSERT INTO t_dqp_adaptive_threshold_log (
+  src_feed_def_key,
+  context_id,
+  dataset_name,
+  bussiness_date,
+  feed_name,
+  record_count,
+  source_type
 )
-SELECT 'Inserted initial DB records into adaptive_threshold_log' FROM ins;
+SELECT
+  frt.feed_def_key,
+  '1',
+  'dataset',
+  frt.bussiness_date,
+  '$feed_name',
+  CAST(COALESCE(fvm.metric_val1, '0') AS BIGINT),
+  'db'
+FROM t_dqp_feed_row_thrshld frt
+JOIN t_dqp_feed_vldn_metrics fvm
+  ON frt.feed_def_key = fvm.feed_inst_key
+WHERE frt.feed_def_key = '$feed_def_key'
+ORDER BY frt.bussiness_date DESC
+LIMIT $window_size;
 SQL
 
     log "Initial records inserted for feed_def_key=$feed_def_key"
