@@ -1,0 +1,71 @@
++-----------------------------+
+|   adaptive_threshold.sh     |
++-------------+--------------+
+              |
+              v
++-----------------------------+
+| 1. Check log data (psql)    |
+| - From: t_dqp_adaptive_     |
+|   threshold_log             |
+| - With source_type = 'db'   |
++-----------------------------+
+              |
+      If log data count = 0
+              |
+              v
++-----------------------------+
+| 2. Insert records from      |
+|    - t_dqp_feed_row_thrshld|
+|    - t_dqp_feed_vldn_metrics|
+|   -> t_dqp_adaptive_        |
+|      threshold_log (db)     |
++-----------------------------+
+              |
+              v
++-----------------------------+
+| 3. Count records from log   |
+|   - Compare with window size|
++-----------------------------+
+              |
+         +----+----+
+         |         |
+      Yes          No
+     (==)         (!=)
+      |             |
+      v             v
++----------------+  +-------------------------+
+| 4a. Build      |  | 4b. Empty dynamic_log_  |
+| dynamic_log_   |  | data = []               |
+| data from log  |  +-------------------------+
+| records        |
++----------------+
+              |
+              v
++-----------------------------+
+| 5. Build request payload    |
+| - feed info + rctConfig +   |
+|   dynamic_log_data          |
++-----------------------------+
+              |
+              v
++-----------------------------+
+| 6. API POST call (optional)|
++-----------------------------+
+              |
+              v
++-----------------------------+
+| 7. Insert ML response into |
+|    t_dqp_adaptive_threshold_log |
+|    - source_type = 'ML'    |
++-----------------------------+
+
+
+| Component                      | Role                                           |
+| ------------------------------ | ---------------------------------------------- |
+| `t_dqp_adaptive_threshold_log` | Stores both DB-derived and ML response records |
+| `t_dqp_feed_row_thrshld`       | Provides `window_size`, `feed_def_key`, etc.   |
+| `t_dqp_feed_vldn_metrics`      | Provides metric values (e.g., record count)    |
+| `jq`                           | Used to process JSON (`dynamic_log_data`)      |
+| `psql`                         | SQL query interface                            |
+| External API                   | Receives payload, returns ML response          |
+
