@@ -1,63 +1,56 @@
-+-----------------------------+
-|   adaptive_threshold.sh     |
-+-------------+--------------+
-              |
-              v
-+-----------------------------+
-| 1. Check log data (psql)    |
-| - From: t_dqp_adaptive_     |
-|   threshold_log             |
-| - With source_type = 'db'   |
-+-----------------------------+
-              |
-      If log data count = 0
-              |
-              v
-+-----------------------------+
-| 2. Insert records from      |
-|    - t_dqp_feed_row_thrshld|
-|    - t_dqp_feed_vldn_metrics|
-|   -> t_dqp_adaptive_        |
-|      threshold_log (db)     |
-+-----------------------------+
-              |
-              v
-+-----------------------------+
-| 3. Count records from log   |
-|   - Compare with window size|
-+-----------------------------+
-              |
-         +----+----+
-         |         |
-      Yes          No
-     (==)         (!=)
-      |             |
-      v             v
-+----------------+  +-------------------------+
-| 4a. Build      |  | 4b. Empty dynamic_log_  |
-| dynamic_log_   |  | data = []               |
-| data from log  |  +-------------------------+
-| records        |
-+----------------+
-              |
-              v
-+-----------------------------+
-| 5. Build request payload    |
-| - feed info + rctConfig +   |
-|   dynamic_log_data          |
-+-----------------------------+
-              |
-              v
-+-----------------------------+
-| 6. API POST call (optional)|
-+-----------------------------+
-              |
-              v
-+-----------------------------+
-| 7. Insert ML response into |
-|    t_dqp_adaptive_threshold_log |
-|    - source_type = 'ML'    |
-+-----------------------------+
++------------------------------+
+| adaptive_threshold_handler.sh|
++--------------+---------------+
+               |
+               v
++-------------------------------------------+
+| Check for existing log data in            |
+| t_dqp_adaptive_threshold_log (source=db)  |
++----------------+--------------------------+
+                 |
+         +-------v--------+
+         | Log data found?|---No--+
+         +-------+--------+       |
+                 |                v
+                Yes       +------------------------------+
+                 |        | Insert new records from:     |
+                 v        | t_dqp_feed_row_thrshld +     |
+       +----------------------+ t_dqp_feed_vldn_metrics |
+       | Count records in log | +------------------------+
+       +----------+-----------+
+                  |
+          +-------v--------+
+          | Compare count   |
+          | with window_size|
+          +-------+--------+
+                  |
+        +---------+----------+
+        |                    |
+    Match                 Not Match
+        |                    |
+        v                    v
++----------------+      +------------------------+
+| Build dynamic_ |      | Set dynamic_log_data = |
+| log_data array |      | empty array []         |
++--------+-------+      +------------+-----------+
+         |                           |
+         v                           v
+   +-------------------------------------+
+   | Build request payload (JSON)        |
+   | with rctConfig + dynamic_log_data   |
+   +----------------+--------------------+
+                        |
+                        v
+               +------------------+
+               | Call ML API      |
+               +--------+---------+
+                        |
+                        v
+     +-------------------------------------------+
+     | Insert ML response into                   |
+     | t_dqp_adaptive_threshold_log (source=ML)  |
+     +-------------------------------------------+
+
 
 
 | Component                      | Role                                           |
