@@ -1,0 +1,40 @@
+build_request_payload() {
+  local feed_def_key="$1"
+  local src_feed_def_key="$2"
+  local feed_inst_key="$3"
+  local src_feed_inst_key="$4"
+  local feed_name="$5"
+  local src_feed_name="$6"
+  local src_feed_inst_name="$7"
+  local business_date="$8"
+  local current_row_count="$9"
+  local fixed_upper="${10}"
+  local fixed_lower="${11}"
+  local threshold_window="${12}"
+  local threshold_expected="${13}"
+  local dynamic_log_data="${14}"
+
+  printf '{
+  "config_data": {
+    "type": "DYNAMIC",
+    "feed_def_key": "%s",
+    "src_feed_def_key": "%s",
+    "feed_inst_key": "%s",
+    "src_feed_inst_key": "%s",
+    "feed_name": "%s",
+    "src_feed_name": "%s",
+    "src_feed_inst_name": "%s",
+    "business_date": "%s",
+    "current_row_count": "%s",
+    "fixed_upper": "%s",
+    "fixed_lower": "%s",
+    "threshold_window": "%s",
+    "threshold_expected": "%s"
+  },
+  "dynamic_log_data": %s
+}\n' \
+  "$feed_def_key" "$src_feed_def_key" "$feed_inst_key" "$src_feed_inst_key" \
+  "$feed_name" "$src_feed_name" "$src_feed_inst_name" "$business_date" \
+  "$current_row_count" "$fixed_upper" "$fixed_lower" "$threshold_window" "$threshold_expected" \
+  "$dynamic_log_data"
+}
