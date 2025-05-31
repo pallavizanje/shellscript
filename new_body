@@ -1,3 +1,38 @@
+dynamic_log_data=$(psql -t -A -h "$pghostname" -U "$Username" "$pg_db" -c "
+  SELECT COALESCE(json_agg(data), '[]')
+  FROM (
+    SELECT json_build_object(
+      'feed_def_key', feed_def_key,
+      'feed_inst_key', feed_inst_key,
+      'src_feed_def_key', src_feed_def_key,
+      'src_feed_inst_key', src_feed_inst_key,
+      'feed_name', feed_name,
+      'src_feed_name', src_feed_name,
+      'src_feed_inst_name', src_feed_inst_name,
+      'src_inst_feed_name', src_inst_feed_name,
+      'business_date', business_date,
+      'record_count', record_count,
+      'iqrlowerthreshold', iqr_lower_threshold,
+      'iqrupperthreshold', iqr_upper_threshold,
+      'zscore', zscore,
+      'gmmlowerthreshold', gmm_lower_threshold,
+      'gmmupperthreshold', gmm_upper_threshold,
+      'iqroutlier', iqr_outlier,
+      'zscoreoutlier', zscore_outlier,
+      'ifoutlier', if_outlier,
+      'gmmoutlier', gmm_outlier,
+      'anomalypercentage', anomaly_percentage,
+      'lastupdatedon', last_updated_on
+    ) AS data
+    FROM t_dqp_adaptive_threshold_log
+    WHERE src_feed_def_key = '$feed_def_key'
+      AND source_type = 'db'
+    ORDER BY business_date DESC
+    LIMIT $threshold_window
+  ) sub;
+" | xargs)
+
+
 build_request_payload() {
   local feed_def_key="$1"
   local src_feed_def_key="$2"
