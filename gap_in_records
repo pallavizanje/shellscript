@@ -1,0 +1,276 @@
+#!/bin/bash
+
+# --- Configuration ---
+TEMP_FILE="/home/corcproc/Scripts/adaptive_threshold_payload.json"
+LOG_FILE="/home/corcproc/Scripts/adaptive_threshold_handler.log"
+API_URL="https://your-api-url"
+
+POSTGRES_HOSTNAME="your-db-host"
+POSTGRES_USERNAME="your-db-user"
+POSTGRES_DATABASE="your-db-name"
+DB_CONN="postgresql://$POSTGRES_USERNAME@$POSTGRES_HOSTNAME/$POSTGRES_DATABASE"
+
+# --- Logging Function ---
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" | tee -a "$LOG_FILE"
+}
+
+# --- Build JSON Payload ---
+build_request_payload () {
+  local feed_def_key="$1"
+  local src_feed_def_key="$2"
+  local src_feed_inst_key="$3"
+  local feed_inst_key="$4"
+  local feed_name="$5"
+  local src_feed_name="$6"
+  local src_feed_inst_name="$7"
+  local business_date="$8"
+  local current_row_count="$9"
+  local fixed_upper="${10}"
+  local fixed_lower="${11}"
+  local threshold_window="${12}"
+  local threshold_weekend="${13}"
+  local dynamic_log_data="${14}"
+
+  cat <<EOF
+{
+  "config_data": {
+    "feed_def_key": "$feed_def_key",
+    "src_feed_def_key": "$src_feed_def_key",
+    "src_feed_inst_key": "$src_feed_inst_key",
+    "feed_inst_key": "$feed_inst_key",
+    "feed_name": "$feed_name",
+    "src_feed_name": "$src_feed_name",
+    "src_feed_inst_name": "$src_feed_inst_name",
+    "business_date": "$business_date",
+    "current_row_count": $current_row_count,
+    "fixed_upper": $fixed_upper,
+    "fixed_lower": $fixed_lower,
+    "threshold_window": $threshold_window,
+    "threshold_weekend": $threshold_weekend,
+    "type": "DYNAMIC"
+  },
+  "dynamic_log_data": $dynamic_log_data
+}
+EOF
+}
+
+# --- Dynamic Count Logic ---
+dynamic_count() {
+  local feed_def_key="$1"
+  local src_feed_def_key="$2"
+  local src_feed_inst_key="$3"
+  local feed_inst_key="$4"
+  local feed_name="$5"
+  local src_feed_name="$6"
+  local src_feed_inst_name="$7"
+  local business_date="$8"
+  local current_row_count="$9"
+  local fixed_upper="${10}"
+  local fixed_lower="${11}"
+  local threshold_window="${12}"
+  local threshold_weekend="${13}"
+
+  log "Checking existing log records for feed_def_key=$feed_def_key..."
+
+  log_count=$(psql -t -A "$DB_CONN" -c "
+    SELECT COUNT(*) FROM t_dqp_adaptive_threshold_log
+    WHERE feed_def_key = '$feed_def_key'
+      AND source_type = 'db';
+  " | xargs)
+
+  if [[ "$log_count" -eq 0 ]]; then
+    log "No existing DB records for $feed_def_key. Inserting initial records..."
+
+    psql "$DB_CONN" <<SQL
+    INSERT INTO t_dqp_adaptive_threshold_log (
+      feed_def_key, feed_inst_key, src_feed_def_key, src_feed_inst_key,
+      feed_name, src_feed_name, business_date, src_feed_inst_name,
+      feed_inst_file_name, record_count, status, source_type, last_updated_on
+    )
+    SELECT
+      fi.feed_def_key,
+      fi.feed_inst_key,
+      sfi.src_feed_def_key,
+      sfi.src_feed_inst_key,
+      fd.feed_name,
+      sfd.src_feed_name,
+      sfi.bus_dt,
+      sfi.src_feed_inst_name,
+      fi.feed_inst_file_name,
+      fvm.metric_val1,
+      'PASS',
+      'db',
+      NOW()
+    FROM t_dqp_src_feed_inst sfi
+    JOIN t_dqp_feed_inst fi ON fi.src_feed_inst_key = sfi.src_feed_inst_key
+    JOIN t_dqp_feed_def fd ON fi.feed_def_key = fd.feed_def_key
+    JOIN t_dqp_src_feed_def sfd ON fd.src_feed_def_key = sfd.src_feed_def_key
+    JOIN t_dqp_feed_vldn_metrics fvm ON fvm.feed_inst_key = fi.feed_inst_key
+    JOIN t_dqp_feed_rule_reln frr ON frr.feed_rule_key = fvm.feed_rule_key
+    JOIN t_dop_do_rule rul ON rul.do_rule_key = frr.dq_rule_key
+      AND rul.rule_desc = 'Record count threshold validation'
+    WHERE sfi.sts_key IN (4, 5)
+      AND fi.sts_key IN (4, 5)
+      AND fi.feed_def_key = '$feed_def_key'
+    ORDER BY fi.bus_dt DESC, fi.feed_inst_key DESC
+    LIMIT $threshold_window;
+SQL
+
+    log "Initial DB records inserted for feed_def_key=$feed_def_key"
+  else
+    # Check for date difference > 5 days
+    latest_date=$(psql -t -A "$DB_CONN" -c "
+      SELECT MAX(business_date) FROM t_dqp_adaptive_threshold_log
+      WHERE feed_def_key = '$feed_def_key' AND source_type = 'db';
+    " | xargs)
+
+    date_diff=$(psql -t -A "$DB_CONN" -c "
+      SELECT DATE_PART('day', DATE '$business_date' - DATE '$latest_date');
+    " | xargs)
+
+    if (( date_diff > 5 )); then
+      log "Business date difference is greater than 5 days. Inserting missing records from range..."
+
+      psql "$DB_CONN" <<SQL
+      INSERT INTO t_dqp_adaptive_threshold_log (
+        feed_def_key, feed_inst_key, src_feed_def_key, src_feed_inst_key,
+        feed_name, src_feed_name, business_date, src_feed_inst_name,
+        feed_inst_file_name, record_count, status, source_type, last_updated_on
+      )
+      SELECT
+        fi.feed_def_key,
+        fi.feed_inst_key,
+        sfi.src_feed_def_key,
+        sfi.src_feed_inst_key,
+        fd.feed_name,
+        sfd.src_feed_name,
+        sfi.bus_dt,
+        sfi.src_feed_inst_name,
+        fi.feed_inst_file_name,
+        fvm.metric_val1,
+        'PASS',
+        'db',
+        NOW()
+      FROM t_dqp_src_feed_inst sfi
+      JOIN t_dqp_feed_inst fi ON fi.src_feed_inst_key = sfi.src_feed_inst_key
+      JOIN t_dqp_feed_def fd ON fi.feed_def_key = fd.feed_def_key
+      JOIN t_dqp_src_feed_def sfd ON fd.src_feed_def_key = sfd.src_feed_def_key
+      JOIN t_dqp_feed_vldn_metrics fvm ON fvm.feed_inst_key = fi.feed_inst_key
+      JOIN t_dqp_feed_rule_reln frr ON frr.feed_rule_key = fvm.feed_rule_key
+      JOIN t_dop_do_rule rul ON rul.do_rule_key = frr.dq_rule_key
+        AND rul.rule_desc = 'Record count threshold validation'
+      WHERE sfi.sts_key IN (4, 5)
+        AND fi.sts_key IN (4, 5)
+        AND fi.feed_def_key = '$feed_def_key'
+        AND sfi.bus_dt > DATE '$latest_date'
+        AND sfi.bus_dt <= DATE '$business_date'
+        AND NOT EXISTS (
+          SELECT 1 FROM t_dqp_adaptive_threshold_log log
+          WHERE log.feed_inst_key = fi.feed_inst_key AND log.source_type = 'db'
+        )
+      ORDER BY fi.bus_dt DESC, fi.feed_inst_key DESC
+      LIMIT $threshold_window;
+SQL
+      log "Inserted missing records between $latest_date and $business_date for $feed_def_key"
+    fi
+  fi
+
+  if [[ "$log_count" -eq "$threshold_window" ]]; then
+    log "Condition matched: log count = threshold_window ($threshold_window). Preparing dynamic_log_data..."
+    dynamic_log_data=$(psql -t -A "$DB_CONN" -c "
+      SELECT COALESCE(json_agg(row_to_json(row_data)), '[]')
+      FROM (
+        SELECT
+          feed_def_key,
+          feed_inst_key,
+          src_feed_def_key,
+          src_feed_inst_key,
+          feed_name,
+          src_feed_name,
+          src_feed_inst_name,
+          TO_CHAR(business_date, 'YYYY-MM-DD') AS business_date,
+          record_count,
+          iqr_lower_threshold,
+          iqr_upper_threshold,
+          zscore,
+          gmm_lower_threshold,
+          gmm_upper_threshold,
+          COALESCE(iqr_outlier, '') AS iqr_outlier,
+          COALESCE(zscore_outlier, '') AS zscore_outlier,
+          COALESCE(if_outlier, '') AS if_outlier,
+          COALESCE(gmm_outlier, '') AS gmm_outlier,
+          anomaly_percentage,
+          TO_CHAR(last_updated_on, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_updated_on
+        FROM t_dqp_adaptive_threshold_log
+        WHERE feed_def_key = '$feed_def_key'
+        ORDER BY business_date DESC
+        LIMIT $threshold_window
+      ) AS row_data;
+    " | tr -d '\n')
+  else
+    log "Condition not met: using empty dynamic_log_data."
+    dynamic_log_data="[]"
+  fi
+
+  # --- Build and Send Payload ---
+  log "Building JSON payload..."
+  build_request_payload \
+    "$feed_def_key" \
+    "$src_feed_def_key" \
+    "$src_feed_inst_key" \
+    "$feed_inst_key" \
+    "$feed_name" \
+    "$src_feed_name" \
+    "$src_feed_inst_name" \
+    "$business_date" \
+    "$current_row_count" \
+    "$fixed_upper" \
+    "$fixed_lower" \
+    "$threshold_window" \
+    "$threshold_weekend" \
+    "$dynamic_log_data" > "$TEMP_FILE"
+
+  log "Sending payload to API..."
+  response=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" -d @"$TEMP_FILE")
+
+  log "API response received. Parsing response..."
+  echo "$response" | jq -c '.ml_response[]?' | while read -r row; do
+    feed_def_key=$(echo "$row" | jq -r '.feed_def_key')
+    business_date=$(echo "$row" | jq -r '.business_date')
+    feed_name=$(echo "$row" | jq -r '.feed_name')
+    record_count=$(echo "$row" | jq -r '.record_count')
+    iqr_lower=$(echo "$row" | jq -r '.iqr_lower_threshold')
+    iqr_upper=$(echo "$row" | jq -r '.iqr_upper_threshold')
+    zscore=$(echo "$row" | jq -r '.zscore')
+    gmm_lower=$(echo "$row" | jq -r '.gmm_lower_threshold')
+    gmm_upper=$(echo "$row" | jq -r '.gmm_upper_threshold')
+    iqr_outlier=$(echo "$row" | jq -r '.iqr_outlier')
+    zscore_outlier=$(echo "$row" | jq -r '.zscore_outlier')
+    if_outlier=$(echo "$row" | jq -r '.if_outlier')
+    gmm_outlier=$(echo "$row" | jq -r '.gmm_outlier')
+    anomaly_percentage=$(echo "$row" | jq -r '.anomaly_percentage')
+
+    psql "$DB_CONN" <<SQL
+    INSERT INTO t_dqp_adaptive_threshold_log (
+      feed_def_key, business_date, feed_name, record_count,
+      iqr_lower_threshold, iqr_upper_threshold, zscore,
+      gmm_lower_threshold, gmm_upper_threshold,
+      iqr_outlier, zscore_outlier, if_outlier, gmm_outlier,
+      anomaly_percentage, last_updated_on, source_type
+    ) VALUES (
+      '$feed_def_key', '$business_date', '$feed_name', $record_count,
+      $iqr_lower, $iqr_upper, $zscore,
+      $gmm_lower, $gmm_upper,
+      '$iqr_outlier', '$zscore_outlier', '$if_outlier', '$gmm_outlier',
+      $anomaly_percentage, now(), 'ML'
+    );
+SQL
+    log "Inserted ML response for feed_def_key=$feed_def_key"
+  done
+
+  log "Completed processing for feed_def_key=$feed_def_key"
+}
+
+# Example call:
+# dynamic_count "101" "201" "301" "401" "MyFeed" "MySourceFeed" "InstanceName" "2025-06-01" 500 100 1000 3 0
