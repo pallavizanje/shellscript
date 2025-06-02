@@ -9,6 +9,11 @@ sed 's/},{/}|{/g' | tr '|' '\n' | while read -r row; do
     echo "$row" | grep -o "\"$1\":[^,}]*" | cut -d':' -f2 | sed 's/^ *"//;s/"$//' | tr -d '"'
   }
 
+  get_value() {
+  echo "$row" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*[^,}]*" | cut -d':' -f2- | sed 's/^ *"//;s/"$//' | tr -d '"'
+}
+
+
   feed_def_key=$(get_value "feed_def_key")
   bussiness_date=$(get_value "bussiness_date")
   feed_name=$(get_value "feed_name")
