@@ -1,16 +1,30 @@
 // src/pages/EventImpactAccessor.tsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 type ImpactResponse = {
   summary: string;
   policies: string[];
 };
 
+const LOCAL_KEY = "eventImpact";
+
 const EventImpactAccessor: React.FC = () => {
   const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<ImpactResponse | null>(null);
+
+  /* ───────── Load cached response (if any) on first render ───────── */
+  useEffect(() => {
+    const cached = localStorage.getItem(LOCAL_KEY);
+    if (cached) {
+      try {
+        setData(JSON.parse(cached) as ImpactResponse);
+      } catch {
+        localStorage.removeItem(LOCAL_KEY); // corrupted cache
+      }
+    }
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,11 +42,12 @@ const EventImpactAccessor: React.FC = () => {
         body: JSON.stringify({ description }),
       });
 
-      if (!res.ok) {
-        throw new Error(`Server responded ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`Server responded ${res.status}`);
 
       const json: ImpactResponse = await res.json();
+
+      /* ─── Cache and display the response ─── */
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(json));
       setData(json);
     } catch (err) {
       setError(
@@ -47,13 +62,12 @@ const EventImpactAccessor: React.FC = () => {
     setDescription("");
     setData(null);
     setError(null);
+    localStorage.removeItem(LOCAL_KEY); // clear cache
   };
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-8">
-      <h1 className="text-2xl font-semibold mb-6">
-        Event Impact Accessor
-      </h1>
+      <h1 className="text-2xl font-semibold mb-6">Event Impact Accessor</h1>
 
       <form
         onSubmit={handleSubmit}
@@ -94,9 +108,7 @@ const EventImpactAccessor: React.FC = () => {
 
       {/* RESULTS */}
       {error && (
-        <p className="mt-6 rounded bg-red-50 px-4 py-3 text-red-700">
-          {error}
-        </p>
+        <p className="mt-6 rounded bg-red-50 px-4 py-3 text-red-700">{error}</p>
       )}
 
       {data && (
