@@ -1,0 +1,63 @@
+image: node:18-alpine
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - when: never
+
+variables:
+  TARGET_DIR: deploy/dist              # Where to copy the build output
+  DEPLOY_BRANCH: dist                  # Branch where the dist folder is committed
+  NPM_CONFIG_LOGLEVEL: error
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - node_modules/
+
+stages:
+  - install
+  - build
+  - deploy
+
+install:
+  stage: install
+  script:
+    - npm ci
+  artifacts:
+    paths:
+      - node_modules/
+    expire_in: 1h
+
+build:
+  stage: build
+  needs: [install]
+  script:
+    - npm run build                     # Assumes output goes to ./build
+  artifacts:
+    paths:
+      - build/
+    expire_in: 1h
+
+deploy:
+  stage: deploy
+  needs: [build]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'   # Only deploy when pushing to main
+  before_script:
+    - git config --global user.email "${GITLAB_USER_EMAIL:-ci@example.com}"
+    - git config --global user.name "${GITLAB_USER_NAME:-CI Runner}"
+  script:
+    - mkdir -p $TARGET_DIR
+    - rsync -a --delete build/ $TARGET_DIR/
+    - git fetch origin $DEPLOY_BRANCH || git checkout --orphan $DEPLOY_BRANCH
+    - git checkout $DEPLOY_BRANCH
+    - git rm -r $TARGET_DIR || true
+    - cp -r build/ $TARGET_DIR/
+    - git add $TARGET_DIR
+    - git commit -m "CI: deploy ${CI_COMMIT_SHORT_SHA} to $TARGET_DIR" || echo "Nothing to commit"
+    - git push origin HEAD:$DEPLOY_BRANCH
+  environment:
+    name: production
+    url: https://$CI_PROJECT_NAMESPACE.gitlab.io/$CI_PROJECT_NAME/
