@@ -1,0 +1,30 @@
+# Stage 1: Build the React TypeScript app using Node.js 18
+FROM node:18 as build
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy package files and install dependencies first, so they can be cached
+COPY package*.json ./
+RUN npm install
+
+# Copy the rest of the application code
+COPY . .
+
+# Build the application (assuming you have a "build" script in package.json)
+RUN npm run build
+
+# Stage 2: Serve the build with Nginx
+FROM nginx:alpine
+
+# Remove the default Nginx static assets
+RUN rm -rf /usr/share/nginx/html/*
+
+# Copy the build output from the first stage to Nginx's html directory
+COPY --from=build /app/build /usr/share/nginx/html
+
+# Expose port 80 to be accessible from outside the container
+EXPOSE 80
+
+# Start Nginx in the foreground
+CMD ["nginx", "-g", "daemon off;"]
