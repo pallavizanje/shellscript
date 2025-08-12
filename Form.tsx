@@ -1,230 +1,174 @@
-import { useState } from "react";
-import { Helmet } from "react-helmet";
-import SearchBox from "../path/to/SearchBox";
-import UpdateForm from "../path/to/UpdateForm";
-import type { PageProps, RecordItem } from "../path/to/page.types";
-
-export default function UpdateMatter({ title }: PageProps) {
-  const [selectedRecord, setSelectedRecord] = useState<RecordItem | null>(null);
-  const [submitStatus, setSubmitStatus] = useState<"success" | "error" | null>(null);
-
-  const handleSubmitComplete = (status: "success" | "error") => {
-    setSubmitStatus(status);
-    setSelectedRecord(null); // hide form after submit
-  };
-
-  return (
-    <main className="h-full w-full">
-      <Helmet>
-        <title>{title}</title>
-      </Helmet>
-
-      <section className="p-6">
-        <div className="min-w-8 flex-1">
-          <h3 className="text-center text-gray-900 sm:truncate sm:text-2xl">
-            Update Matter
-          </h3>
-
-          <div className="pb-2 pt-2">
-            <div className="p-4">
-              <SearchBox
-                onSelect={(record: RecordItem): void => {
-                  setSelectedRecord(record); // ✅ Only set when user picks from dropdown
-                  setSubmitStatus(null); // reset status
-                }}
-              />
-            </div>
-          </div>
-
-          {/* ✅ Status messages */}
-          {submitStatus === "success" && (
-            <p className="text-green-600 p-4">✅ Submitted successfully!</p>
-          )}
-          {submitStatus === "error" && (
-            <p className="text-red-600 p-4">❌ Something went wrong.</p>
-          )}
-
-          {/* ✅ Show UpdateForm only after selection */}
-          {selectedRecord && (
-            <div className="h-[calc(100vh-330px)] overflow-hidden">
-              <UpdateForm
-                selectedRecord={selectedRecord}
-                onSubmitComplete={handleSubmitComplete}
-              />
-            </div>
-          )}
-        </div>
-      </section>
-    </main>
-  );
-}
-
-// UpdateForm.tsx
-import React, { useEffect, useMemo } from "react";
-import { Formik, Form, Field } from "formik";
-import * as Yup from "yup";
-import type { RecordItem } from "../path/to/page.types";
-
-interface Props {
-  selectedRecord: RecordItem;
-  onSubmitComplete?: (status: "success" | "error") => void;
-}
-
-const validationSchema = Yup.object({
-  name: Yup.string().required("Name is required"),
-  // add other fields...
-});
-
-export default function UpdateForm({ selectedRecord, onSubmitComplete }: Props) {
-  // map selectedRecord (which may be partial) into safe initialValues
-  const initialValues = useMemo(() => ({
-    name: selectedRecord?.name ?? "",
-    description: selectedRecord?.description ?? "",
-    // add other fields with defaults
-  }), [selectedRecord]);
-
-  return (
-    <Formik
-      initialValues={initialValues}
-      enableReinitialize={true}    // <-- important
-      validateOnMount={true}       // validates immediately when mounted/initialValues change
-      validationSchema={validationSchema}
-      onSubmit={async (values, { resetForm }) => {
-        try {
-          // submit logic...
-          await apiCallToSubmit(values);
-          onSubmitComplete?.("success");
-          // hide form handled by parent (per your existing flow)
-        } catch (err) {
-          onSubmitComplete?.("error");
-        }
-      }}
-    >
-      {({ isSubmitting, resetForm, validateForm, setTouched, errors }) => {
-        // Run whenever selectedRecord (hence initialValues) changes
-        useEffect(() => {
-          // reset the form to new values
-          resetForm({ values: initialValues });
-
-          // validate and mark only the fields that currently have errors as touched
-          (async () => {
-            const errs = await validateForm();
-            if (Object.keys(errs).length) {
-              setTouched(Object.fromEntries(
-                Object.keys(errs).map(key => [key, true])
-              ), true);
-            }
-          })();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [initialValues]); // depends on the computed initialValues
-
-        return (
-          <Form>
-            <div>
-              <label>Name</label>
-              <Field name="name" />
-              {/* show error message component */}
-            </div>
-
-            <div>
-              <label>Description</label>
-              <Field name="description" />
-            </div>
-
-            <button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? "Submitting..." : "Submit"}
-            </button>
-          </Form>
-        );
-      }}
-    </Formik>
-  );
-}
-
-
-
-import React, { useEffect, useMemo } from "react";
+import React, { useState, useEffect } from "react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
-import type { RecordItem } from "../path/to/page.types";
 
-interface Props {
-  selectedRecord: RecordItem;
-  onSubmitComplete?: (status: "success" | "error") => void;
-}
+// Fake search API
+const fetchSearchResults = (query: string) => {
+  return new Promise<{ id: number; name: string; description: string }[]>((resolve) => {
+    setTimeout(() => {
+      resolve([
+        { id: 1, name: "John Doe", description: "Developer" },
+        { id: 2, name: "Jane Smith", description: "Designer" },
+      ]);
+    }, 500);
+  });
+};
 
-const validationSchema = Yup.object({
-  name: Yup.string().required("Name is required"),
-  description: Yup.string().required("Description is required"),
-});
+export default function UpdateForm() {
+  const [searchResults, setSearchResults] = useState<
+    { id: number; name: string; description: string }[]
+  >([]);
+  const [selectedRecord, setSelectedRecord] = useState<any>(null);
+  const [showModal, setShowModal] = useState(false);
+  const [submitMessage, setSubmitMessage] = useState("");
+  const [showForm, setShowForm] = useState(false);
 
-export default function UpdateForm({ selectedRecord, onSubmitComplete }: Props) {
-  const initialValues = useMemo(
-    () => ({
-      name: selectedRecord?.name ?? "",
-      description: selectedRecord?.description ?? "",
-    }),
-    [selectedRecord]
-  );
+  const validationSchema = Yup.object({
+    name: Yup.string().required("Name is required"),
+    description: Yup.string().required("Description is required"),
+  });
+
+  const initialValues = selectedRecord || { name: "", description: "" };
 
   const formik = useFormik({
     initialValues,
     enableReinitialize: true,
     validationSchema,
-    validateOnMount: true,
-    onSubmit: async (values) => {
+    onSubmit: async (values, { resetForm }) => {
       try {
-        // Simulate API call
-        await new Promise((res) => setTimeout(res, 500));
-        onSubmitComplete?.("success");
-      } catch {
-        onSubmitComplete?.("error");
+        // Simulate API submit
+        await new Promise((res) => setTimeout(res, 1000));
+        setSubmitMessage("Form submitted successfully!");
+        setShowForm(false);
+        resetForm();
+      } catch (error) {
+        setSubmitMessage("Error submitting form");
       }
     },
   });
 
-  // ✅ Now we can use useEffect at top level
-  useEffect(() => {
-    formik.resetForm({ values: initialValues });
-    formik.validateForm().then((errors) => {
-      if (Object.keys(errors).length) {
-        formik.setTouched(
-          Object.fromEntries(Object.keys(errors).map((key) => [key, true])),
-          true
-        );
-      }
-    });
-  }, [initialValues]);
+  // Search API call
+  const handleSearch = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    if (value.length > 1) {
+      const results = await fetchSearchResults(value);
+      setSearchResults(results);
+    } else {
+      setSearchResults([]);
+    }
+  };
+
+  const handleSelect = (record: any) => {
+    setSelectedRecord(record);
+    setShowForm(true);
+    setSubmitMessage("");
+  };
+
+  const handlePreSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setShowModal(true);
+  };
+
+  const handleAccept = () => {
+    setShowModal(false);
+    formik.handleSubmit();
+  };
+
+  const handleReject = () => {
+    setShowModal(false);
+  };
 
   return (
-    <form onSubmit={formik.handleSubmit}>
-      <div>
-        <label>Name</label>
-        <input
-          name="name"
-          value={formik.values.name}
-          onChange={formik.handleChange}
-        />
-        {formik.touched.name && formik.errors.name && (
-          <div className="text-red-500">{formik.errors.name}</div>
-        )}
-      </div>
+    <div className="p-4">
+      <h2>Search & Update Form</h2>
 
-      <div>
-        <label>Description</label>
-        <input
-          name="description"
-          value={formik.values.description}
-          onChange={formik.handleChange}
-        />
-        {formik.touched.description && formik.errors.description && (
-          <div className="text-red-500">{formik.errors.description}</div>
-        )}
-      </div>
+      {/* Search Box */}
+      <input
+        type="text"
+        placeholder="Search..."
+        onChange={handleSearch}
+        className="border p-2 my-2"
+      />
+      <ul className="border p-2">
+        {searchResults.map((r) => (
+          <li
+            key={r.id}
+            onClick={() => handleSelect(r)}
+            className="cursor-pointer hover:bg-gray-100 p-1"
+          >
+            {r.name} - {r.description}
+          </li>
+        ))}
+      </ul>
 
-      <button type="submit" disabled={formik.isSubmitting}>
-        {formik.isSubmitting ? "Submitting..." : "Submit"}
-      </button>
-    </form>
+      {/* Success / Error Message */}
+      {submitMessage && (
+        <div className="mt-2 text-green-600 font-semibold">{submitMessage}</div>
+      )}
+
+      {/* Form */}
+      {showForm && selectedRecord && (
+        <form onSubmit={handlePreSubmit} className="mt-4">
+          <div>
+            <label>Name</label>
+            <input
+              name="name"
+              value={formik.values.name}
+              onChange={formik.handleChange}
+              className="border p-1 block"
+            />
+            {formik.touched.name && formik.errors.name && (
+              <div className="text-red-500">{formik.errors.name}</div>
+            )}
+          </div>
+
+          <div>
+            <label>Description</label>
+            <input
+              name="description"
+              value={formik.values.description}
+              onChange={formik.handleChange}
+              className="border p-1 block"
+            />
+            {formik.touched.description && formik.errors.description && (
+              <div className="text-red-500">{formik.errors.description}</div>
+            )}
+          </div>
+
+          <div className="flex gap-2 mt-3">
+            <button type="submit" disabled={formik.isSubmitting}>
+              {formik.isSubmitting ? "Submitting..." : "Submit"}
+            </button>
+            <button
+              type="button"
+              onClick={() => formik.resetForm({ values: initialValues })}
+            >
+              Reset
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Terms & Conditions Modal */}
+      {showModal && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black/50">
+          <div className="bg-white p-4 rounded shadow-lg w-80">
+            <h3 className="font-bold mb-2">Terms & Conditions</h3>
+            <p>Please accept our terms before submitting the form.</p>
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={handleReject} className="border px-3 py-1">
+                Reject
+              </button>
+              <button
+                onClick={handleAccept}
+                className="bg-blue-500 text-white px-3 py-1"
+              >
+                Accept
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
-  }
+}
