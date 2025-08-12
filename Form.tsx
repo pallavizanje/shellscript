@@ -31,10 +31,11 @@ export default function UpdateForm() {
 
   const gridRef = useRef<AgGridReact<any>>(null);
 
-  const [rowData] = useState([
-    { id: 101, name: "Alice", role: "Admin" },
-    { id: 102, name: "Bob", role: "User" },
-    { id: 103, name: "Charlie", role: "Manager" },
+  // ✅ Row data with isSelected
+  const [rowData, setRowData] = useState([
+    { id: 101, name: "Alice", role: "Admin", isSelected: true },
+    { id: 102, name: "Bob", role: "User", isSelected: false },
+    { id: 103, name: "Charlie", role: "Manager", isSelected: true },
   ]);
 
   const [columnDefs] = useState([
@@ -114,9 +115,29 @@ export default function UpdateForm() {
 
   const handleReject = () => setShowModal(false);
 
+  // ✅ Pre-check rows based on isSelected
+  const onGridReady = (params: any) => {
+    params.api.forEachNode((node: any) => {
+      if (node.data.isSelected) {
+        node.setSelected(true);
+      }
+    });
+  };
+
+  // ✅ Save selection and sync with rowData
   const handleSaveGridSelection = () => {
     const selectedRows = gridRef.current?.api.getSelectedRows() || [];
+
+    // Update formik values
     formik.setFieldValue("selectedUsers", selectedRows);
+
+    // Sync isSelected state
+    const updatedRowData = rowData.map((row) => ({
+      ...row,
+      isSelected: selectedRows.some((sel) => sel.id === row.id),
+    }));
+    setRowData(updatedRowData);
+
     setShowGridModal(false);
   };
 
@@ -245,6 +266,7 @@ export default function UpdateForm() {
                 rowData={rowData}
                 columnDefs={columnDefs}
                 rowSelection="multiple"
+                onGridReady={onGridReady}
               />
             </div>
             <div className="flex justify-end gap-2 mt-4">
