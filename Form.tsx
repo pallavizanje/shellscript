@@ -140,4 +140,91 @@ export default function UpdateForm({ selectedRecord, onSubmitComplete }: Props) 
     </Formik>
   );
 }
-      
+
+
+
+import React, { useEffect, useMemo } from "react";
+import { useFormik } from "formik";
+import * as Yup from "yup";
+import type { RecordItem } from "../path/to/page.types";
+
+interface Props {
+  selectedRecord: RecordItem;
+  onSubmitComplete?: (status: "success" | "error") => void;
+}
+
+const validationSchema = Yup.object({
+  name: Yup.string().required("Name is required"),
+  description: Yup.string().required("Description is required"),
+});
+
+export default function UpdateForm({ selectedRecord, onSubmitComplete }: Props) {
+  const initialValues = useMemo(
+    () => ({
+      name: selectedRecord?.name ?? "",
+      description: selectedRecord?.description ?? "",
+    }),
+    [selectedRecord]
+  );
+
+  const formik = useFormik({
+    initialValues,
+    enableReinitialize: true,
+    validationSchema,
+    validateOnMount: true,
+    onSubmit: async (values) => {
+      try {
+        // Simulate API call
+        await new Promise((res) => setTimeout(res, 500));
+        onSubmitComplete?.("success");
+      } catch {
+        onSubmitComplete?.("error");
+      }
+    },
+  });
+
+  // ✅ Now we can use useEffect at top level
+  useEffect(() => {
+    formik.resetForm({ values: initialValues });
+    formik.validateForm().then((errors) => {
+      if (Object.keys(errors).length) {
+        formik.setTouched(
+          Object.fromEntries(Object.keys(errors).map((key) => [key, true])),
+          true
+        );
+      }
+    });
+  }, [initialValues]);
+
+  return (
+    <form onSubmit={formik.handleSubmit}>
+      <div>
+        <label>Name</label>
+        <input
+          name="name"
+          value={formik.values.name}
+          onChange={formik.handleChange}
+        />
+        {formik.touched.name && formik.errors.name && (
+          <div className="text-red-500">{formik.errors.name}</div>
+        )}
+      </div>
+
+      <div>
+        <label>Description</label>
+        <input
+          name="description"
+          value={formik.values.description}
+          onChange={formik.handleChange}
+        />
+        {formik.touched.description && formik.errors.description && (
+          <div className="text-red-500">{formik.errors.description}</div>
+        )}
+      </div>
+
+      <button type="submit" disabled={formik.isSubmitting}>
+        {formik.isSubmitting ? "Submitting..." : "Submit"}
+      </button>
+    </form>
+  );
+  }
