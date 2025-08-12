@@ -1,6 +1,9 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
+import { AgGridReact } from "ag-grid-react";
+import "ag-grid-community/styles/ag-grid.css";
+import "ag-grid-community/styles/ag-theme-alpine.css";
 
 // Fake search API
 const fetchSearchResults = (query: string) => {
@@ -22,15 +25,41 @@ export default function UpdateForm() {
   >([]);
   const [selectedRecord, setSelectedRecord] = useState<any>(null);
   const [showModal, setShowModal] = useState(false);
+  const [showGridModal, setShowGridModal] = useState(false);
   const [submitMessage, setSubmitMessage] = useState("");
   const [showForm, setShowForm] = useState(false);
 
+  const gridRef = useRef<AgGridReact<any>>(null);
+
+  const [rowData] = useState([
+    { id: 101, name: "Alice", role: "Admin" },
+    { id: 102, name: "Bob", role: "User" },
+    { id: 103, name: "Charlie", role: "Manager" },
+  ]);
+
+  const [columnDefs] = useState([
+    {
+      headerName: "ID",
+      field: "id",
+      checkboxSelection: true,
+      headerCheckboxSelection: true,
+    },
+    { headerName: "Name", field: "name" },
+    { headerName: "Role", field: "role" },
+  ]);
+
+  // ✅ selectedUsers can be an empty array now
   const validationSchema = Yup.object({
     name: Yup.string().required("Name is required"),
     description: Yup.string().required("Description is required"),
+    selectedUsers: Yup.array().nullable(),
   });
 
-  const initialValues = selectedRecord || { name: "", description: "" };
+  const initialValues = selectedRecord || {
+    name: "",
+    description: "",
+    selectedUsers: [],
+  };
 
   const formik = useFormik({
     initialValues,
@@ -38,7 +67,7 @@ export default function UpdateForm() {
     validationSchema,
     onSubmit: async (values, { resetForm }) => {
       try {
-        // Simulate API submit
+        console.log("Form Submitted:", values);
         await new Promise((res) => setTimeout(res, 1000));
         setSubmitMessage("Form submitted successfully!");
         setShowForm(false);
@@ -49,7 +78,6 @@ export default function UpdateForm() {
     },
   });
 
-  // Search API call
   const handleSearch = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     if (value.length > 1) {
@@ -68,15 +96,12 @@ export default function UpdateForm() {
 
   const handlePreSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    // Trigger validation
     const errors = await formik.validateForm();
     formik.setTouched({
       name: true,
       description: true,
+      selectedUsers: true,
     });
-
-    // Show modal only if there are no errors
     if (Object.keys(errors).length === 0) {
       setShowModal(true);
     }
@@ -87,8 +112,12 @@ export default function UpdateForm() {
     formik.handleSubmit();
   };
 
-  const handleReject = () => {
-    setShowModal(false);
+  const handleReject = () => setShowModal(false);
+
+  const handleSaveGridSelection = () => {
+    const selectedRows = gridRef.current?.api.getSelectedRows() || [];
+    formik.setFieldValue("selectedUsers", selectedRows);
+    setShowGridModal(false);
   };
 
   return (
@@ -150,6 +179,26 @@ export default function UpdateForm() {
             )}
           </div>
 
+          {/* AG Grid Selector */}
+          <div className="mt-2">
+            <button
+              type="button"
+              className="bg-gray-200 px-2"
+              onClick={() => setShowGridModal(true)}
+            >
+              Select Users
+            </button>
+            {formik.values.selectedUsers.length > 0 && (
+              <ul className="list-disc pl-5 mt-2 text-sm text-gray-600">
+                {formik.values.selectedUsers.map((u: any) => (
+                  <li key={u.id}>
+                    {u.name} - {u.role}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
           <div className="flex gap-2 mt-3">
             <button type="submit" disabled={formik.isSubmitting}>
               {formik.isSubmitting ? "Submitting..." : "Submit"}
@@ -179,6 +228,37 @@ export default function UpdateForm() {
                 className="bg-blue-500 text-white px-3 py-1"
               >
                 Accept
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AG Grid Modal */}
+      {showGridModal && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black/50">
+          <div className="bg-white p-4 rounded shadow-lg w-[600px] h-[400px] flex flex-col">
+            <h3 className="font-bold mb-2">Select Users</h3>
+            <div className="ag-theme-alpine flex-1">
+              <AgGridReact
+                ref={gridRef}
+                rowData={rowData}
+                columnDefs={columnDefs}
+                rowSelection="multiple"
+              />
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowGridModal(false)}
+                className="border px-3 py-1"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveGridSelection}
+                className="bg-blue-500 text-white px-3 py-1"
+              >
+                Save
               </button>
             </div>
           </div>
