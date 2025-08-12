@@ -1,17 +1,19 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
 
 // Fake search API
 const fetchSearchResults = (query: string) => {
-  return new Promise<{ id: number; name: string; description: string }[]>((resolve) => {
-    setTimeout(() => {
-      resolve([
-        { id: 1, name: "John Doe", description: "Developer" },
-        { id: 2, name: "Jane Smith", description: "Designer" },
-      ]);
-    }, 500);
-  });
+  return new Promise<{ id: number; name: string; description: string }[]>(
+    (resolve) => {
+      setTimeout(() => {
+        resolve([
+          { id: 1, name: "John Doe", description: "Developer" },
+          { id: 2, name: "Jane Smith", description: "Designer" },
+        ]);
+      }, 500);
+    }
+  );
 };
 
 export default function UpdateForm() {
@@ -64,9 +66,20 @@ export default function UpdateForm() {
     setSubmitMessage("");
   };
 
-  const handlePreSubmit = (e: React.FormEvent) => {
+  const handlePreSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setShowModal(true);
+
+    // Trigger validation
+    const errors = await formik.validateForm();
+    formik.setTouched({
+      name: true,
+      description: true,
+    });
+
+    // Show modal only if there are no errors
+    if (Object.keys(errors).length === 0) {
+      setShowModal(true);
+    }
   };
 
   const handleAccept = () => {
@@ -115,6 +128,7 @@ export default function UpdateForm() {
               name="name"
               value={formik.values.name}
               onChange={formik.handleChange}
+              onBlur={formik.handleBlur}
               className="border p-1 block"
             />
             {formik.touched.name && formik.errors.name && (
@@ -128,6 +142,7 @@ export default function UpdateForm() {
               name="description"
               value={formik.values.description}
               onChange={formik.handleChange}
+              onBlur={formik.handleBlur}
               className="border p-1 block"
             />
             {formik.touched.description && formik.errors.description && (
